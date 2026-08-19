@@ -32,3 +32,16 @@ A copy of this license is made available in this container at /NGC-DL-CONTAINER-
   @app.on_event("startup")
 
 
+docker rm -f dia-tts 2>/dev/null || true
+
+docker rmi dia-tts 2>/dev/null || true
+
+docker build --no-cache -t dia-tts .
+
+docker run --rm --gpus all -p 8000:8000 dia-tts
+
+docker exec -it dia-tts bash
+
+nvidia-smi
+python3 -c "import torch; print('Torch:', torch.__version__); print('Torch CUDA:', torch.version.cuda); print('CUDA available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE')"
+
