@@ -1,139 +1,415 @@
+#!/usr/bin/env python3
+
 import argparse
-import re
+import io
+import sys
 import time
 from pathlib import Path
 
 import requests
 import soundfile as sf
-from jiwer import cer, wer
 
 
-def now_ns():
-    return time.perf_counter_ns()
-
-
-def elapsed_ms(start_ns, end_ns=None):
-    if end_ns is None:
-        end_ns = now_ns()
-    return (end_ns - start_ns) / 1_000_000.0
-
-
-def clean_reference(text: str) -> str:
-    text = re.sub(r"\[S\d+\]", " ", text)
-    text = re.sub(r"\([^)]*\)", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def transcribe_for_accuracy(audio_path: Path, model_size: str, device: str):
+def safe_float(headers, key, default=0.0):
     try:
-        from faster_whisper import WhisperModel
-    except ImportError as exc:
-        raise RuntimeError(
-            "Accuracy requested but faster-whisper is not installed. "
-            "Run: pip install faster-whisper jiwer"
-        ) from exc
-
-    compute_type = "float16" if device == "cuda" else "int8"
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    segments, _ = model.transcribe(str(audio_path), language="en", beam_size=5)
-    return " ".join(segment.text.strip() for segment in segments).strip()
+        return float(headers.get(key, default))
+    except Exception:
+        return default
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Dia TTS latency/accuracy client")
-    parser.add_argument("--server", default="http://localhost:8000")
-    parser.add_argument("--text", required=True)
-    parser.add_argument("--output", default="output.wav")
-    parser.add_argument("--max-new-tokens", type=int, default=1024)
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--timeout", type=int, default=300)
-    parser.add_argument("--accuracy", action="store_true", help="ASR-transcribe output and compute WER/CER")
-    parser.add_argument("--asr-model", default="small.en", help="faster-whisper model used for accuracy")
-    parser.add_argument("--asr-device", choices=["cpu", "cuda"], default="cpu")
+    parser = argparse.ArgumentParser(
+        description="Client for Dia TTS API"
+    )
+
+    parser.add_argument(
+        "--server",
+        default="http://localhost:8000",
+        help="Dia TTS server URL",
+    )
+
+    parser.add_argument(
+        "--text",
+        required=True,
+        help='Text to synthesize, e.g. "[S1] Hello there."',
+    )
+
+    parser.add_argument(
+        "--output",
+        default="output.wav",
+        help="Output WAV file",
+    )
+
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=1024,
+        help="Maximum number of generated tokens",
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional generation seed",
+    )
+
+    parser.add_argument(
+        "--play",
+        action="store_true",
+        help="Play generated audio after saving",
+    )
+
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=300.0,
+        help="HTTP request timeout in seconds",
+    )
+
     args = parser.parse_args()
 
-    payload = {"text": args.text, "max_new_tokens": args.max_new_tokens, "seed": args.seed}
-    url = f"{args.server.rstrip('/')}/tts"
+    url = args.server.rstrip("/") + "/tts"
 
-    session = requests.Session()
-    request_start_ns = now_ns()
+    payload = {
+        "text": args.text,
+        "max_new_tokens": args.max_new_tokens,
+    }
 
-    response = session.post(url, json=payload, timeout=args.timeout, stream=True)
-    headers_received_ns = now_ns()
-    ttfb_ms = elapsed_ms(request_start_ns, headers_received_ns)
+    if args.seed is not None:
+        payload["seed"] = args.seed
 
-    if not response.ok:
-        raise SystemExit(f"Request failed ({response.status_code}): {response.text}")
+    print("=" * 80)
+    print("DIA TTS CLIENT")
+    print("=" * 80)
+    print(f"Server            : {url}")
+    print(f"Text              : {args.text}")
+    print(f"Output            : {args.output}")
+    print(f"Max new tokens    : {args.max_new_tokens}")
+    print(f"Seed              : {args.seed}")
+    print(f"Play              : {args.play}")
+    print("=" * 80)
 
-    output = Path(args.output)
-    first_audio_ns = None
-    total_bytes = 0
+    request_start = time.perf_counter()
 
-    with output.open("wb") as f:
-        for chunk in response.iter_content(chunk_size=4096):
-            if not chunk:
-                continue
-            if first_audio_ns is None:
-                first_audio_ns = now_ns()
-            f.write(chunk)
-            total_bytes += len(chunk)
+    first_byte_time = None
+    audio_bytes = bytearray()
 
-    request_done_ns = now_ns()
-    ttfa_ms = elapsed_ms(request_start_ns, first_audio_ns) if first_audio_ns else float("nan")
-    total_ms = elapsed_ms(request_start_ns, request_done_ns)
-    download_after_first_audio_ms = elapsed_ms(first_audio_ns, request_done_ns) if first_audio_ns else 0.0
+    try:
+        with requests.post(
+            url,
+            json=payload,
+            stream=True,
+            timeout=args.timeout,
+        ) as response:
 
-    info = sf.info(str(output))
-    audio_duration_s = float(info.duration)
-    client_rtf = (total_ms / 1000.0) / audio_duration_s if audio_duration_s > 0 else 0.0
+            headers_received = time.perf_counter()
 
+            if response.status_code != 200:
+                try:
+                    error_text = response.text
+                except Exception:
+                    error_text = "<unable to decode server response>"
+
+                print(
+                    f"Request failed ({response.status_code}): "
+                    f"{error_text}"
+                )
+                sys.exit(1)
+
+            for chunk in response.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+
+                if first_byte_time is None:
+                    first_byte_time = time.perf_counter()
+
+                audio_bytes.extend(chunk)
+
+    except requests.exceptions.Timeout:
+        print(
+            f"Request timed out after {args.timeout:.1f} seconds."
+        )
+        sys.exit(1)
+
+    except requests.exceptions.ConnectionError as exc:
+        print(f"Connection failed: {exc}")
+        sys.exit(1)
+
+    except requests.RequestException as exc:
+        print(f"Request failed: {exc}")
+        sys.exit(1)
+
+    request_end = time.perf_counter()
+
+    if not audio_bytes:
+        print("Server returned no audio.")
+        sys.exit(1)
+
+    if first_byte_time is None:
+        first_byte_time = request_end
+
+    # ------------------------------------------------------------------
+    # Save WAV
+    # ------------------------------------------------------------------
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "wb") as f:
+        f.write(audio_bytes)
+
+    # ------------------------------------------------------------------
+    # Inspect WAV
+    # ------------------------------------------------------------------
+
+    try:
+        with sf.SoundFile(io.BytesIO(audio_bytes)) as wav:
+            sample_rate = wav.samplerate
+            frames = len(wav)
+            channels = wav.channels
+            audio_duration_s = frames / sample_rate
+    except Exception as exc:
+        print(f"Could not inspect generated WAV: {exc}")
+        sample_rate = 0
+        frames = 0
+        channels = 0
+        audio_duration_s = 0.0
+
+    # ------------------------------------------------------------------
+    # Client-side timing
+    # ------------------------------------------------------------------
+
+    client_ttfb_ms = (
+        headers_received - request_start
+    ) * 1000.0
+
+    client_ttfa_ms = (
+        first_byte_time - request_start
+    ) * 1000.0
+
+    first_audio_to_done_ms = (
+        request_end - first_byte_time
+    ) * 1000.0
+
+    client_total_ms = (
+        request_end - request_start
+    ) * 1000.0
+
+    client_rtf = (
+        (client_total_ms / 1000.0) / audio_duration_s
+        if audio_duration_s > 0
+        else 0.0
+    )
+
+    # ------------------------------------------------------------------
+    # Server metrics from headers
+    # ------------------------------------------------------------------
+
+    server_preprocess_ms = safe_float(
+        response.headers,
+        "X-Preprocess-Time-MS",
+    )
+
+    server_inference_ms = safe_float(
+        response.headers,
+        "X-Inference-Time-MS",
+    )
+
+    server_decode_ms = safe_float(
+        response.headers,
+        "X-Decode-Time-MS",
+    )
+
+    server_encoding_ms = safe_float(
+        response.headers,
+        "X-Encoding-Time-MS",
+    )
+
+    server_total_ms = safe_float(
+        response.headers,
+        "X-Server-Total-MS",
+    )
+
+    server_audio_duration_s = safe_float(
+        response.headers,
+        "X-Audio-Duration-S",
+    )
+
+    generation_rtf = safe_float(
+        response.headers,
+        "X-Generation-RTF",
+    )
+
+    server_total_rtf = safe_float(
+        response.headers,
+        "X-RTF",
+    )
+
+    gpu_allocated_mb = safe_float(
+        response.headers,
+        "X-GPU-Allocated-MB",
+    )
+
+    gpu_reserved_mb = safe_float(
+        response.headers,
+        "X-GPU-Reserved-MB",
+    )
+
+    gpu_peak_mb = safe_float(
+        response.headers,
+        "X-GPU-Peak-MB",
+    )
+
+    request_id = response.headers.get(
+        "X-Request-ID",
+        "N/A",
+    )
+
+    server_sample_rate = response.headers.get(
+        "X-Sample-Rate",
+        str(sample_rate),
+    )
+
+    # ------------------------------------------------------------------
+    # Print metrics
+    # ------------------------------------------------------------------
+
+    print("")
     print("=" * 80)
     print("CLIENT LATENCY")
     print("=" * 80)
-    print(f"HTTP request -> headers/TTFB : {ttfb_ms:.2f} ms")
-    print(f"TTFT / TTFA                 : {ttfa_ms:.2f} ms")
-    print(f"First audio -> complete      : {download_after_first_audio_ms:.2f} ms")
-    print(f"CLIENT TOTAL                 : {total_ms:.2f} ms")
-    print(f"Audio duration               : {audio_duration_s:.3f} s")
-    print(f"Client E2E RTF               : {client_rtf:.4f}")
-    print(f"Response size                : {total_bytes / 1024:.2f} KiB")
+    print(
+        f"HTTP request -> headers/TTFB : "
+        f"{client_ttfb_ms:.2f} ms"
+    )
+    print(
+        f"TTFT / TTFA                  : "
+        f"{client_ttfa_ms:.2f} ms"
+    )
+    print(
+        f"First audio -> complete       : "
+        f"{first_audio_to_done_ms:.2f} ms"
+    )
+    print(
+        f"CLIENT TOTAL                  : "
+        f"{client_total_ms:.2f} ms"
+    )
+    print(
+        f"Audio duration                : "
+        f"{audio_duration_s:.3f} sec"
+    )
+    print(
+        f"Client E2E RTF                : "
+        f"{client_rtf:.4f}"
+    )
+    print(
+        f"Response size                 : "
+        f"{len(audio_bytes) / 1024:.2f} KiB"
+    )
 
-    print("\n" + "=" * 80)
+    print("")
+    print("=" * 80)
     print("SERVER LATENCY")
     print("=" * 80)
-    print(f"Preprocess                    : {response.headers.get('X-Preprocess-Time-MS', 'n/a')} ms")
-    print(f"Inference / generation        : {response.headers.get('X-Inference-Time-MS', 'n/a')} ms")
-    print(f"Decode                        : {response.headers.get('X-Decode-Time-MS', 'n/a')} ms")
-    print(f"WAV encoding                  : {response.headers.get('X-Encoding-Time-MS', 'n/a')} ms")
-    print(f"SERVER TOTAL                  : {response.headers.get('X-Server-Total-MS', 'n/a')} ms")
-    print(f"Server RTF                    : {response.headers.get('X-RTF', 'n/a')}")
-    print(f"Request ID                    : {response.headers.get('X-Request-ID', 'n/a')}")
-    print(f"Sample rate                   : {response.headers.get('X-Sample-Rate', 'n/a')} Hz")
+    print(
+        f"Preprocess                    : "
+        f"{server_preprocess_ms:.2f} ms"
+    )
+    print(
+        f"Inference / generation        : "
+        f"{server_inference_ms:.2f} ms"
+    )
+    print(
+        f"Decode                        : "
+        f"{server_decode_ms:.2f} ms"
+    )
+    print(
+        f"WAV encoding                  : "
+        f"{server_encoding_ms:.2f} ms"
+    )
+    print(
+        f"SERVER TOTAL                  : "
+        f"{server_total_ms:.2f} ms"
+    )
+    print(
+        f"Server audio duration         : "
+        f"{server_audio_duration_s:.3f} sec"
+    )
+    print(
+        f"Generation RTF                : "
+        f"{generation_rtf:.4f}"
+    )
+    print(
+        f"Server total RTF              : "
+        f"{server_total_rtf:.4f}"
+    )
 
-    if args.accuracy:
-        accuracy_start_ns = now_ns()
-        hypothesis = transcribe_for_accuracy(output, args.asr_model, args.asr_device)
-        asr_ms = elapsed_ms(accuracy_start_ns)
-        reference = clean_reference(args.text)
-        word_error_rate = wer(reference, hypothesis)
-        char_error_rate = cer(reference, hypothesis)
-        word_accuracy = max(0.0, 1.0 - word_error_rate) * 100.0
-        char_accuracy = max(0.0, 1.0 - char_error_rate) * 100.0
+    if gpu_allocated_mb > 0:
+        print(
+            f"GPU allocated                 : "
+            f"{gpu_allocated_mb:.2f} MB"
+        )
+        print(
+            f"GPU reserved                  : "
+            f"{gpu_reserved_mb:.2f} MB"
+        )
+        print(
+            f"GPU peak                      : "
+            f"{gpu_peak_mb:.2f} MB"
+        )
 
-        print("\n" + "=" * 80)
-        print("TTS ACCURACY (ASR-BASED)")
-        print("=" * 80)
-        print(f"Reference                     : {reference}")
-        print(f"ASR transcript                : {hypothesis}")
-        print(f"WER                           : {word_error_rate * 100:.2f}%")
-        print(f"Word accuracy                 : {word_accuracy:.2f}%")
-        print(f"CER                           : {char_error_rate * 100:.2f}%")
-        print(f"Character accuracy            : {char_accuracy:.2f}%")
-        print(f"Accuracy ASR evaluation time  : {asr_ms:.2f} ms")
-        print("NOTE: this measures intelligibility/content fidelity through ASR; it is not a MOS or voice-quality score.")
+    print("")
+    print("=" * 80)
+    print("AUDIO")
+    print("=" * 80)
+    print(f"Saved                         : {output_path}")
+    print(f"Sample rate                   : {sample_rate} Hz")
+    print(f"Server sample rate            : {server_sample_rate} Hz")
+    print(f"Channels                      : {channels}")
+    print(f"Frames                        : {frames}")
+    print(f"Duration                      : {audio_duration_s:.3f} sec")
+    print(f"Request ID                    : {request_id}")
+    print("=" * 80)
 
-    print("\nSaved audio:", output.resolve())
+    # ------------------------------------------------------------------
+    # Playback
+    # ------------------------------------------------------------------
+
+    if args.play:
+        try:
+            import sounddevice as sd
+
+            print("")
+            print(f"Playing {output_path} ...")
+
+            audio, sr = sf.read(
+                str(output_path),
+                dtype="float32",
+            )
+
+            sd.play(audio, sr)
+            sd.wait()
+
+            print("Playback complete.")
+
+        except ImportError:
+            print("")
+            print(
+                "Playback requires sounddevice."
+            )
+            print(
+                "Install it with:"
+            )
+            print(
+                "python -m pip install sounddevice"
+            )
+
+        except Exception as exc:
+            print("")
+            print(
+                f"Audio playback failed: {exc}"
+            )
 
 
 if __name__ == "__main__":
