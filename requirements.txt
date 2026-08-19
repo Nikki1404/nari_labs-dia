@@ -1,11 +1,8 @@
-transformers
-accelerate
 fastapi
 uvicorn[standard]
+transformers
+accelerate
 numpy
-scipy
 soundfile
-requests
+scipy
 pydantic
-faster-whisper
-jiwer
