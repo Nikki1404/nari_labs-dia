@@ -1,9 +1,11 @@
-fastapi
-uvicorn[standard]
 transformers
 accelerate
+fastapi
+uvicorn[standard]
 numpy
 scipy
 soundfile
-safetensors
-huggingface-hub
+requests
+pydantic
+faster-whisper
+jiwer
