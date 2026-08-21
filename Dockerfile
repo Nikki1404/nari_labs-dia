@@ -10,16 +10,23 @@ ENV PIP_NO_CACHE_DIR=1
 ENV CC=/usr/bin/gcc
 ENV CXX=/usr/bin/g++
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    python3-dev \
-    gcc \
-    g++ \
-    build-essential \
-    git \
-    libsndfile1 \
-    ffmpeg \
+ENV MODEL_ID="nari-labs/Dia-1.6B-0626"
+
+ENV HF_HOME=/app/hf_cache
+ENV TRANSFORMERS_CACHE=/app/hf_cache
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-dev \
+        gcc \
+        g++ \
+        build-essential \
+        git \
+        libsndfile1 \
+        libportaudio2 \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -37,21 +44,33 @@ WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
 
+
 RUN python3 -m pip install \
     -r /app/requirements.txt
 
 
-COPY server.py /app/server.py
 
+RUN python3 -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download( \
+    repo_id='nari-labs/Dia-1.6B-0626', \
+    allow_patterns=[ \
+        '*.json', \
+        '*.safetensors', \
+        '*.txt', \
+        '*.model' \
+    ] \
+); \
+print('Dia model downloaded successfully')"
+
+
+COPY server.py /app/server.py
 
 RUN python3 -c "\
 import torch; \
-print('Torch version:', torch.__version__); \
-print('Torch CUDA:', torch.version.cuda)"
-
+print('Torch version :', torch.__version__); \
+print('Torch CUDA    :', torch.version.cuda)"
 
 EXPOSE 8000
 
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]
-
-                                                                                                  
