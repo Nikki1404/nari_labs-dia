@@ -34,4 +34,4 @@ Now that your identity is confirmed, how can I assist you with your login today?
 [S2]No further queries, ending this call now.
  [S1]Glad to help. Thank you. Have a nice day.
 
-curl -X POST "https://wer-api-xxxxxxxxxx-uc.a.run.app/wer_score" -H "Content-Type: application/json" -d '{"ground_truth":"Hello this is a test","transcription":"Hello this is test"}'
+$seeds=@(); while($seeds.Count -lt 60){$seeds+=Get-Random -Minimum 100 -Maximum 25001;$seeds=@($seeds|Sort-Object -Unique)}; foreach($seed in $seeds){Write-Host "Testing seed: $seed"; python client.py --server http://localhost:8000 --seed $seed --text "[S1] Hello. Thank you for calling Inspira Financial. How can I help you today? [S2] Hello. I need assistance with my account." --output "seed_$seed.wav"}
