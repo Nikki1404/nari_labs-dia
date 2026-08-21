@@ -10,7 +10,6 @@ ENV PIP_NO_CACHE_DIR=1
 ENV CC=/usr/bin/gcc
 ENV CXX=/usr/bin/g++
 
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
@@ -54,3 +53,5 @@ print('Torch CUDA:', torch.version.cuda)"
 EXPOSE 8000
 
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]
+
+                                                                                                  
