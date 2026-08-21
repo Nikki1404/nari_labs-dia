@@ -34,30 +34,4 @@ Now that your identity is confirmed, how can I assist you with your login today?
 [S2]No further queries, ending this call now.
  [S1]Glad to help. Thank you. Have a nice day.
 
-@app.post("/wer_score")
-async def calculate_wer(request: Request, data: WerData):
-    try:
-        ref = data.ground_truth
-        hyp = data.transcription
-        
-        transform = jiwer.Compose([
-            jiwer.ToLowerCase(),
-            jiwer.RemoveWhiteSpace(replace_by_space=True),
-            jiwer.RemoveMultipleSpaces(),
-            jiwer.RemovePunctuation(),
-            jiwer.ExpandCommonEnglishContractions(), 
-            jiwer.RemoveMultipleSpaces(),
-            jiwer.Strip(),
-            jiwer.RemoveEmptyStrings(),
-            jiwer.ReduceToListOfListOfWords(word_delimiter=" ")
-        ])
-
-        wer_score = jiwer.wer(ref, hyp, reference_transform=transform, hypothesis_transform=transform)
- 
-        return {"wer_score": wer_score}
-
-    except Exception as e:
-        return {"error": "An unexpected error occurred: " + str(e)}
-
-
-                                   
+curl -X POST "https://wer-api-xxxxxxxxxx-uc.a.run.app/wer_score" -H "Content-Type: application/json" -d '{"ground_truth":"Hello this is a test","transcription":"Hello this is test"}'
