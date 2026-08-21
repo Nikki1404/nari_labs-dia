@@ -35,3 +35,12 @@ Now that your identity is confirmed, how can I assist you with your login today?
  [S1]Glad to help. Thank you. Have a nice day.
 
 $seeds=@(); while($seeds.Count -lt 60){$seeds+=Get-Random -Minimum 100 -Maximum 25001;$seeds=@($seeds|Sort-Object -Unique)}; foreach($seed in $seeds){Write-Host "Testing seed: $seed"; python client.py --server http://localhost:8000 --seed $seed --text "[S1] Hello. Thank you for calling Inspira Financial. How can I help you today? [S2] Hello. I need assistance with my account." --output "seed_$seed.wav"}
+
+
+so, for example, we need to provide the params of an audit and then the algorithms will find the datapoints for that are close to that audit value
+ 
+please make audit function to accept these variables and return these same variables + "claim_id"
+ 
+Billed Amount |	Procedure Code|	Diagnosis Code||	Allowed Amount|	Paid Amount|	Insurance Type|	Claim Status|	Reason Code|	Follow-up Required|	AR Status|	Outcome
+ 
+ 
