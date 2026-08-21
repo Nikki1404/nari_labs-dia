@@ -1,47 +1,5 @@
-/usr/local/lib/python3.10/dist-packages/transformers/tokenization_utils_base.py:2355: UserWarning: `max_length` is ignored when `padding`=`True` and there is no truncation strategy. To pad to max length, use `padding='max_length'`.
-  warnings.warn(
-INFO:     172.17.0.1:46786 - "POST /tts HTTP/1.1" 500 Internal Server Error
-
-(venv) PS C:\Users\re_nikitav\Documents\nari_labs-dia>  python client.py --server http://localhost:8000  --text "[S1] Hello. This is Dia running from my standalone API." --output hello.wav
-Request failed (500): {"detail":"TTS generation failed: Failed to find C compiler. Please specify via CC environment variable or set triton.knobs.build.impl."}
-
-(base) root@EC03-E01-AICOE1:/home/CORP/re_nikitav/nari_labs-dia# docker run --rm --gpus all -p 8000:8000 dia-tts
-
-==========
-== CUDA ==
-==========
-
-CUDA Version 12.6.3
-
-Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-
-This container image and its contents are governed by the NVIDIA Deep Learning Container License.
-By pulling and using the container, you accept the terms and conditions of this license:
-https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
-
-A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
-
-/usr/local/lib/python3.10/dist-packages/torch/cuda/__init__.py:188: UserWarning: CUDA initialization: The NVIDIA driver on your system is too old (found version 12060). Please update your GPU driver by downloading and installing a new version from the URL: http://www.nvidia.com/Download/index.aspx Alternatively, go to: https://pytorch.org to install a PyTorch version that has been compiled with your version of the CUDA driver. (Triggered internally at /__w/pytorch/pytorch/c10/cuda/CUDAFunctions.cpp:119.)
-  return torch._C._cuda_getDeviceCount() > 0
-/app/server.py:37: DeprecationWarning:
-        on_event is deprecated, use lifespan event handlers instead.
-
-        Read more about it in the
-        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
-
-  @app.on_event("startup")
+(venv) PS C:\Users\re_nikitav\Documents\nari_labs-dia>  python client.py --server http://localhost:8000  --text "[S1]Hello. [S2]Hello. Thank you for calling Inspira Financial. For this call, would you prefer to continue in English or Spanish language? [S1] English. [S2] Thank you, Your language preference for this call is set to English. How can I help you today? [S1] I need to verify my identity [S2] I can help you with that" --output hello.wav --play
 
 
-docker rm -f dia-tts 2>/dev/null || true
-
-docker rmi dia-tts 2>/dev/null || true
-
-docker build --no-cache -t dia-tts .
-
-docker run --rm --gpus all -p 8000:8000 dia-tts
-
-docker exec -it dia-tts bash
-
-nvidia-smi
-python3 -c "import torch; print('Torch:', torch.__version__); print('Torch CUDA:', torch.version.cuda); print('CUDA available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE')"
-
+for this it is not generating transcript after How can I help you today
+so why it is breaking in mid and in config I would like to set s1 as female contant voice shouldn't change alsways and for speaker s2 i should be able to change voice is male or female via client side how to do that 
