@@ -793,6 +793,8 @@ def tts(req: TTSRequest):
 #client.py-
 #!/usr/bin/env python3
 
+#!/usr/bin/env python3
+
 import argparse
 import io
 import sys
@@ -803,41 +805,19 @@ import requests
 import soundfile as sf
 
 
-def safe_float(
-    headers,
-    key,
-    default=0.0,
-):
-
+def safe_float(headers, key, default=0.0):
     try:
-
-        return float(
-            headers.get(
-                key,
-                default,
-            )
-        )
-
+        return float(headers.get(key, default))
     except Exception:
-
         return default
 
 
 def load_text(args):
-
     if args.text_file:
-
-        path = Path(
-            args.text_file
-        )
+        path = Path(args.text_file)
 
         if not path.exists():
-
-            print(
-                f"Text file not found: "
-                f"{path}"
-            )
-
+            print(f"Text file not found: {path}")
             sys.exit(1)
 
         return path.read_text(
@@ -845,18 +825,13 @@ def load_text(args):
         ).strip()
 
     if args.text:
-
         return args.text.strip()
 
-    print(
-        "Provide --text or --text-file"
-    )
-
+    print("Provide --text or --text-file")
     sys.exit(1)
 
 
 def main():
-
     parser = argparse.ArgumentParser(
         description="Dia TTS Client"
     )
@@ -898,6 +873,30 @@ def main():
         action="store_true",
     )
 
+    # =================================================================
+    # CLIENT-SIDE SPEED CONTROL
+    # =================================================================
+
+    parser.add_argument(
+        "--speed",
+        type=float,
+        default=1.0,
+        help=(
+            "Client-side playback speed. "
+            "1.0=original, 0.9=10%% slower, "
+            "0.8=20%% slower"
+        ),
+    )
+
+    parser.add_argument(
+        "--save-adjusted",
+        action="store_true",
+        help=(
+            "Save speed-adjusted audio as a "
+            "separate WAV file."
+        ),
+    )
+
     parser.add_argument(
         "--timeout",
         type=float,
@@ -906,25 +905,37 @@ def main():
 
     args = parser.parse_args()
 
-    text = load_text(
-        args
-    )
+    # =================================================================
+    # Validate speed
+    # =================================================================
+
+    if args.speed <= 0:
+        print("--speed must be greater than 0")
+        sys.exit(1)
+
+    # I recommend keeping this in a sensible range.
+    if args.speed < 0.5 or args.speed > 2.0:
+        print(
+            "Recommended --speed range is "
+            "0.5 to 2.0"
+        )
+        sys.exit(1)
+
+    text = load_text(args)
 
     url = (
         args.server.rstrip("/")
         + "/tts"
     )
 
+    # IMPORTANT:
+    # speed is NOT sent to the server.
+    #
+    # The server remains completely unchanged.
     payload = {
-
-        "text":
-            text,
-
-        "seed":
-            args.seed,
-
-        "max_new_tokens":
-            args.max_new_tokens,
+        "text": text,
+        "seed": args.seed,
+        "max_new_tokens": args.max_new_tokens,
     }
 
     print("")
@@ -933,8 +944,7 @@ def main():
     print("=" * 80)
 
     print(
-        f"Server            : "
-        f"{url}"
+        f"Server            : {url}"
     )
 
     print(
@@ -943,8 +953,7 @@ def main():
     )
 
     print(
-        f"Seed              : "
-        f"{args.seed}"
+        f"Seed              : {args.seed}"
     )
 
     print(
@@ -972,14 +981,25 @@ def main():
         f"{args.play}"
     )
 
-    print("=" * 80)
-
-    request_start = (
-        time.perf_counter()
+    print(
+        f"Playback speed    : "
+        f"{args.speed}"
     )
 
-    try:
+    print(
+        f"Save adjusted     : "
+        f"{args.save_adjusted}"
+    )
 
+    print("=" * 80)
+
+    # =================================================================
+    # Request
+    # =================================================================
+
+    request_start = time.perf_counter()
+
+    try:
         response = requests.post(
             url,
             json=payload,
@@ -987,63 +1007,42 @@ def main():
         )
 
     except requests.exceptions.Timeout:
-
         print(
             f"Request timed out after "
             f"{args.timeout:.1f} seconds."
         )
-
         sys.exit(1)
 
     except requests.RequestException as exc:
-
         print(
             f"Request failed: {exc}"
         )
-
         sys.exit(1)
 
-    headers_received = (
-        time.perf_counter()
-    )
+    headers_received = time.perf_counter()
 
     if response.status_code != 200:
-
         print(
             f"Request failed "
             f"({response.status_code}): "
             f"{response.text}"
         )
-
         sys.exit(1)
 
-    audio_bytes = (
-        response.content
-    )
+    audio_bytes = response.content
 
-    first_audio_time = (
-        time.perf_counter()
-    )
-
-    request_end = (
-        first_audio_time
-    )
+    first_audio_time = time.perf_counter()
+    request_end = first_audio_time
 
     if not audio_bytes:
-
-        print(
-            "Server returned no audio."
-        )
-
+        print("Server returned no audio.")
         sys.exit(1)
 
-    # =============================================================================
-    # Save
-    # =============================================================================
+    # =================================================================
+    # Save ORIGINAL server audio
+    # =================================================================
 
-    output_path = Path(
-        args.output
-    )
+    output_path = Path(args.output)
 
     output_path.parent.mkdir(
         parents=True,
@@ -1054,40 +1053,26 @@ def main():
         audio_bytes
     )
 
-    # =============================================================================
-    # Inspect
-    # =============================================================================
+    # =================================================================
+    # Inspect WAV
+    # =================================================================
 
     try:
-
         with sf.SoundFile(
-            io.BytesIO(
-                audio_bytes
-            )
+            io.BytesIO(audio_bytes)
         ) as wav:
 
-            sample_rate = (
-                wav.samplerate
-            )
-
-            frames = len(
-                wav
-            )
-
-            channels = (
-                wav.channels
-            )
+            sample_rate = wav.samplerate
+            frames = len(wav)
+            channels = wav.channels
 
             audio_duration_s = (
-                frames
-                / sample_rate
+                frames / sample_rate
             )
 
     except Exception as exc:
-
         print(
-            f"Could not inspect WAV: "
-            f"{exc}"
+            f"Could not inspect WAV: {exc}"
         )
 
         sample_rate = 0
@@ -1095,9 +1080,9 @@ def main():
         channels = 0
         audio_duration_s = 0
 
-    # =============================================================================
+    # =================================================================
     # Client metrics
-    # =============================================================================
+    # =================================================================
 
     client_ttfb_ms = (
         headers_received
@@ -1115,20 +1100,15 @@ def main():
     ) * 1000
 
     client_rtf = (
-        (
-            client_total_ms
-            / 1000
-        )
+        (client_total_ms / 1000)
         / audio_duration_s
-
         if audio_duration_s > 0
-
         else 0
     )
 
-    # =============================================================================
+    # =================================================================
     # Server metrics
-    # =============================================================================
+    # =================================================================
 
     preprocess_ms = safe_float(
         response.headers,
@@ -1185,16 +1165,14 @@ def main():
         "X-GPU-Peak-MB",
     )
 
-    request_id = (
-        response.headers.get(
-            "X-Request-ID",
-            "N/A",
-        )
+    request_id = response.headers.get(
+        "X-Request-ID",
+        "N/A",
     )
 
-    # =============================================================================
-    # Print
-    # =============================================================================
+    # =================================================================
+    # Print latency
+    # =================================================================
 
     print("")
     print("=" * 80)
@@ -1217,7 +1195,7 @@ def main():
     )
 
     print(
-        f"Audio duration          : "
+        f"Original audio duration : "
         f"{audio_duration_s:.3f} sec"
     )
 
@@ -1292,7 +1270,7 @@ def main():
     print("=" * 80)
 
     print(
-        f"Saved                   : "
+        f"Original saved          : "
         f"{output_path}"
     )
 
@@ -1307,12 +1285,7 @@ def main():
     )
 
     print(
-        f"Frames                  : "
-        f"{frames}"
-    )
-
-    print(
-        f"Duration                : "
+        f"Original duration       : "
         f"{audio_duration_s:.3f} sec"
     )
 
@@ -1322,66 +1295,238 @@ def main():
     )
 
     print(
+        f"Playback speed          : "
+        f"{args.speed}"
+    )
+
+    print(
         f"Request ID              : "
         f"{request_id}"
     )
 
     print("=" * 80)
 
-    # =============================================================================
-    # Playback
-    # =============================================================================
+    # =================================================================
+    # SPEED ADJUSTMENT
+    #
+    # Happens entirely on CLIENT.
+    # Server output remains unchanged.
+    # =================================================================
 
-    if args.play:
+    if (
+        args.play
+        or args.save_adjusted
+    ):
 
         try:
+            import numpy as np
+            import librosa
 
-            import sounddevice as sd
+            print("")
+            print(
+                "Loading audio for "
+                "client-side processing..."
+            )
 
             audio, sr = sf.read(
-                str(
-                    output_path
-                ),
+                str(output_path),
                 dtype="float32",
+            )
+
+            adjusted_audio = audio
+
+            # =========================================================
+            # Time stretch
+            #
+            # 1.00 = unchanged
+            # 0.95 = 5% slower
+            # 0.90 = 10% slower
+            # 0.85 = 15% slower
+            # 0.80 = 20% slower
+            #
+            # Pitch remains approximately unchanged.
+            # =========================================================
+
+            if args.speed != 1.0:
+
+                print(
+                    f"Adjusting speed: "
+                    f"1.00 -> {args.speed}"
+                )
+
+                # Handle mono/stereo properly.
+                if audio.ndim == 1:
+
+                    adjusted_audio = (
+                        librosa.effects.time_stretch(
+                            audio,
+                            rate=args.speed,
+                        )
+                    )
+
+                else:
+
+                    channels_list = []
+
+                    for channel in range(
+                        audio.shape[1]
+                    ):
+
+                        stretched = (
+                            librosa.effects.time_stretch(
+                                audio[:, channel],
+                                rate=args.speed,
+                            )
+                        )
+
+                        channels_list.append(
+                            stretched
+                        )
+
+                    min_length = min(
+                        len(channel)
+                        for channel
+                        in channels_list
+                    )
+
+                    adjusted_audio = np.stack(
+                        [
+                            channel[:min_length]
+                            for channel
+                            in channels_list
+                        ],
+                        axis=1,
+                    )
+
+            adjusted_duration_s = (
+                len(adjusted_audio)
+                / sr
+            )
+
+            print(
+                f"Original duration : "
+                f"{audio_duration_s:.3f} sec"
+            )
+
+            print(
+                f"Adjusted duration : "
+                f"{adjusted_duration_s:.3f} sec"
+            )
+
+            # =========================================================
+            # Optional save
+            # =========================================================
+
+            if args.save_adjusted:
+
+                speed_string = (
+                    str(args.speed)
+                    .replace(".", "_")
+                )
+
+                adjusted_path = (
+                    output_path.with_name(
+                        output_path.stem
+                        + "_speed_"
+                        + speed_string
+                        + output_path.suffix
+                    )
+                )
+
+                sf.write(
+                    str(adjusted_path),
+                    adjusted_audio,
+                    sr,
+                    subtype="PCM_16",
+                )
+
+                print(
+                    f"Adjusted saved   : "
+                    f"{adjusted_path}"
+                )
+
+            # =========================================================
+            # Playback
+            # =========================================================
+
+            if args.play:
+
+                try:
+                    import sounddevice as sd
+
+                except ImportError:
+
+                    print(
+                        "sounddevice is not installed."
+                    )
+
+                    print(
+                        "Install using:"
+                    )
+
+                    print(
+                        "python -m pip install "
+                        "sounddevice"
+                    )
+
+                    return
+
+                print("")
+                print(
+                    f"Playing complete audio "
+                    f"at speed={args.speed}..."
+                )
+
+                playback_start = (
+                    time.perf_counter()
+                )
+
+                sd.play(
+                    adjusted_audio,
+                    sr,
+                )
+
+                sd.wait()
+
+                playback_ms = (
+                    time.perf_counter()
+                    - playback_start
+                ) * 1000
+
+                print(
+                    "Playback complete."
+                )
+
+                print(
+                    f"Playback duration : "
+                    f"{playback_ms / 1000:.3f} sec"
+                )
+
+        except ImportError as exc:
+
+            print(
+                f"Missing dependency: {exc}"
             )
 
             print("")
             print(
-                "Playing complete audio..."
-            )
-
-            sd.play(
-                audio,
-                sr,
-            )
-
-            # Complete WAV must finish.
-            sd.wait()
-
-            print(
-                "Playback complete."
-            )
-
-        except ImportError:
-
-            print(
-                "Install playback support:"
+                "Install:"
             )
 
             print(
-                "python -m pip install sounddevice"
+                "python -m pip install "
+                "librosa soundfile sounddevice"
             )
 
         except Exception as exc:
 
             print(
-                f"Playback failed: "
-                f"{exc}"
+                f"Speed adjustment/playback "
+                f"failed: {exc}"
             )
 
 
 if __name__ == "__main__":
-
     main()
 
 
