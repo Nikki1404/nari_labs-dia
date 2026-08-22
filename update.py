@@ -1623,3 +1623,4 @@ docker run --rm --gpus all --ipc=host --shm-size=8g -p 8000:8000 dia-tts
 
 python client.py --server http://localhost:8000 --text-file full_call.txt --seed 8472 --max-new-tokens 12288 --output full_call_seed_8472.wav --play
 python client.py --server http://localhost:8000 --text-file full_call.txt --seed 8472 --max-new-tokens 16384 --output full_call_seed_8472.wav --play
+python client.py --server http://localhost:8000 --text-file full_call.txt --seed 8472 --max-new-tokens 12288 --output full_call.wav --speed 0.85 --save-adjusted --play
