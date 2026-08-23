@@ -1,9 +1,7 @@
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
-
 ENV http_proxy="http://163.116.128.80:8080"
 ENV https_proxy="http://163.116.128.80:8080"
-
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -24,16 +22,13 @@ RUN apt-get update && \
         build-essential \
         git \
         libsndfile1 \
-        libportaudio2 \
         ffmpeg \
     && rm -rf /var/lib/apt/lists/*
-
 
 RUN python3 -m pip install --upgrade \
     pip \
     setuptools \
     wheel
-
 
 RUN python3 -m pip install \
     torch==2.6.0 \
