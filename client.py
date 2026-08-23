@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import io
 import json
 import queue
 import struct
@@ -16,60 +15,33 @@ import soundfile as sf
 
 
 # =============================================================================
-# HELPERS
+# FILE HELPERS
 # =============================================================================
 
-def safe_float(
-    headers,
-    key,
-    default=0.0,
+def read_text_file(
+    path_value,
 ):
 
-    try:
-
-        return float(
-            headers.get(
-                key,
-                default,
-            )
-        )
-
-    except Exception:
-
-        return default
-
-
-def load_text(args):
-
-    if args.text_file:
-
-        path = Path(
-            args.text_file
-        )
-
-        if not path.exists():
-
-            print(
-                f"Text file not found: "
-                f"{path}"
-            )
-
-            sys.exit(1)
-
-        return path.read_text(
-            encoding="utf-8"
-        ).strip()
-
-    if args.text:
-
-        return args.text.strip()
-
-    print(
-        "Provide --text or --text-file"
+    path = Path(
+        path_value
     )
 
-    sys.exit(1)
+    if not path.exists():
 
+        print(
+            f"File not found: {path}"
+        )
+
+        sys.exit(1)
+
+    return path.read_text(
+        encoding="utf-8"
+    ).strip()
+
+
+# =============================================================================
+# NETWORK STREAM HELPERS
+# =============================================================================
 
 def receive_exact(
     raw,
@@ -87,7 +59,7 @@ def receive_exact(
         if not part:
 
             raise EOFError(
-                "Server stream ended unexpectedly"
+                "Server stream ended unexpectedly."
             )
 
         data.extend(
@@ -101,6 +73,7 @@ def receive_exact(
 
 def read_frame(raw):
 
+    # JSON metadata size.
     metadata_size = struct.unpack(
         ">I",
         receive_exact(
@@ -109,18 +82,18 @@ def read_frame(raw):
         ),
     )[0]
 
-    metadata_bytes = receive_exact(
-        raw,
-        metadata_size,
-    )
-
+    # JSON metadata.
     metadata = json.loads(
-        metadata_bytes.decode(
+        receive_exact(
+            raw,
+            metadata_size,
+        ).decode(
             "utf-8"
         )
     )
 
-    audio_size = struct.unpack(
+    # Audio byte count.
+    pcm_size = struct.unpack(
         ">Q",
         receive_exact(
             raw,
@@ -130,11 +103,11 @@ def read_frame(raw):
 
     pcm_bytes = b""
 
-    if audio_size > 0:
+    if pcm_size > 0:
 
         pcm_bytes = receive_exact(
             raw,
-            audio_size,
+            pcm_size,
         )
 
     return (
@@ -144,229 +117,204 @@ def read_frame(raw):
 
 
 # =============================================================================
-# SHORT WAV RESPONSE
+# MAIN
 # =============================================================================
 
-def handle_short_wav(
-    response,
-    args,
-    request_start,
-    headers_received,
-):
+def main():
 
-    audio_bytes = (
-        response.content
-    )
-
-    first_audio_time = (
-        time.perf_counter()
-    )
-
-    output_path = Path(
-        args.output
-    )
-
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    output_path.write_bytes(
-        audio_bytes
-    )
-
-    request_end = (
-        time.perf_counter()
-    )
-
-    with sf.SoundFile(
-        io.BytesIO(
-            audio_bytes
+    parser = argparse.ArgumentParser(
+        description=(
+            "Dia long-text TTS client "
+            "with reference audio conditioning"
         )
-    ) as wav:
+    )
 
-        sample_rate = wav.samplerate
-        frames = len(wav)
-        channels = wav.channels
+    parser.add_argument(
+        "--server",
+        default="http://localhost:8000",
+    )
 
-        duration = (
-            frames
-            / sample_rate
+    parser.add_argument(
+        "--text-file",
+        required=True,
+        help=(
+            "Long [S1]/[S2] transcript."
+        ),
+    )
+
+    parser.add_argument(
+        "--reference-audio",
+        required=True,
+        help=(
+            "Local reference WAV file."
+        ),
+    )
+
+    parser.add_argument(
+        "--reference-text",
+        required=True,
+        help=(
+            "TXT containing the exact "
+            "transcript of reference WAV."
+        ),
+    )
+
+    parser.add_argument(
+        "--output",
+        default="full_call.wav",
+    )
+
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=3072,
+    )
+
+    parser.add_argument(
+        "--play",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--speed",
+        type=float,
+        default=1.0,
+        help=(
+            "Client playback speed. "
+            "1.0=original, "
+            "0.9=10%% slower."
+        ),
+    )
+
+    parser.add_argument(
+        "--save-adjusted",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=1800.0,
+    )
+
+    args = parser.parse_args()
+
+    # =========================================================================
+    # VALIDATION
+    # =========================================================================
+
+    transcript_path = Path(
+        args.text_file
+    )
+
+    reference_audio_path = Path(
+        args.reference_audio
+    )
+
+    reference_text_path = Path(
+        args.reference_text
+    )
+
+    for path in [
+        transcript_path,
+        reference_audio_path,
+        reference_text_path,
+    ]:
+
+        if not path.exists():
+
+            print(
+                f"File not found: {path}"
+            )
+
+            sys.exit(1)
+
+    if args.speed <= 0:
+
+        print(
+            "--speed must be > 0"
         )
 
-    ttfb_ms = (
-        headers_received
-        - request_start
-    ) * 1000
+        sys.exit(1)
 
-    ttfa_ms = (
-        first_audio_time
-        - request_start
-    ) * 1000
+    # =========================================================================
+    # LOAD TEXT
+    # =========================================================================
 
-    total_ms = (
-        request_end
-        - request_start
-    ) * 1000
-
-    print("")
-    print("=" * 80)
-    print("CLIENT LATENCY")
-    print("=" * 80)
-
-    print(
-        f"TTFB              : "
-        f"{ttfb_ms:.2f} ms"
+    text = read_text_file(
+        transcript_path
     )
 
-    print(
-        f"TTFT / TTFA       : "
-        f"{ttfa_ms:.2f} ms"
+    reference_text = read_text_file(
+        reference_text_path
     )
 
-    print(
-        f"CLIENT TOTAL      : "
-        f"{total_ms:.2f} ms"
-    )
-
-    print(
-        f"Audio duration    : "
-        f"{duration:.3f}s"
+    url = (
+        args.server.rstrip("/")
+        + "/tts"
     )
 
     print("")
     print("=" * 80)
-    print("SERVER LATENCY")
+    print("DIA REFERENCE TTS CLIENT")
     print("=" * 80)
 
     print(
-        f"Preprocess        : "
-        f"{safe_float(response.headers, 'X-Preprocess-Time-MS'):.2f} ms"
+        f"Server            : {url}"
     )
 
     print(
-        f"Inference         : "
-        f"{safe_float(response.headers, 'X-Inference-Time-MS'):.2f} ms"
+        f"Transcript        : "
+        f"{transcript_path}"
     )
 
     print(
-        f"Decode            : "
-        f"{safe_float(response.headers, 'X-Decode-Time-MS'):.2f} ms"
+        f"Reference audio   : "
+        f"{reference_audio_path}"
     )
 
     print(
-        f"SERVER TOTAL      : "
-        f"{safe_float(response.headers, 'X-Server-Total-MS'):.2f} ms"
+        f"Reference text    : "
+        f"{reference_text_path}"
     )
 
     print(
-        f"Generation RTF    : "
-        f"{safe_float(response.headers, 'X-Generation-RTF'):.4f}"
-    )
-
-    print("")
-    print("=" * 80)
-    print("AUDIO")
-    print("=" * 80)
-
-    print(
-        f"Saved             : "
-        f"{output_path}"
+        f"Output            : "
+        f"{args.output}"
     )
 
     print(
-        f"Sample rate       : "
-        f"{sample_rate} Hz"
+        f"Transcript words  : "
+        f"{len(text.split())}"
     )
 
     print(
-        f"Channels          : "
-        f"{channels}"
+        f"Max new tokens    : "
+        f"{args.max_new_tokens}"
     )
 
     print(
-        f"Seed              : "
-        f"{args.seed}"
+        f"Playback          : "
+        f"{args.play}"
+    )
+
+    print(
+        f"Playback speed    : "
+        f"{args.speed}"
     )
 
     print("=" * 80)
 
-    # =================================================================
-    # Playback
-    # =================================================================
-
-    if args.play:
-
-        try:
-
-            import sounddevice as sd
-
-            audio, sr = sf.read(
-                str(output_path),
-                dtype="float32",
-            )
-
-            print("")
-            print(
-                "Playing audio..."
-            )
-
-            sd.play(
-                audio,
-                sr,
-            )
-
-            sd.wait()
-
-            print(
-                "Playback complete."
-            )
-
-        except Exception as exc:
-
-            print(
-                f"Playback failed: {exc}"
-            )
-
-
-# =============================================================================
-# LONG STREAM
-# =============================================================================
-
-def handle_long_stream(
-    response,
-    args,
-    request_start,
-    headers_received,
-):
-
-    output_path = Path(
-        args.output
-    )
-
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    # =================================================================
-    # Playback queue
-    # =================================================================
+    # =========================================================================
+    # PLAYBACK QUEUE
+    # =========================================================================
 
     playback_queue = (
         queue.Queue()
     )
 
-    playback_thread = None
     playback_enabled = False
-
-    # =================================================================
-    # Playback worker
-    #
-    # STRICT ORDER:
-    #
-    # Chunk 1 finishes completely before chunk 2 starts.
-    # =================================================================
+    playback_thread = None
 
     if args.play:
 
@@ -391,48 +339,67 @@ def handle_long_stream(
                         break
 
                     (
-                        chunk_index,
-                        chunk_count,
+                        block_index,
+                        block_count,
                         audio,
                         sample_rate,
                     ) = item
 
+                    playback_audio = (
+                        audio
+                    )
+
+                    # ---------------------------------------------------------
+                    # OPTIONAL CLIENT-SIDE SPEED ADJUSTMENT
+                    # ---------------------------------------------------------
+
+                    if args.speed != 1.0:
+
+                        try:
+
+                            import librosa
+
+                            playback_audio = (
+                                librosa
+                                .effects
+                                .time_stretch(
+                                    audio,
+                                    rate=args.speed,
+                                )
+                            )
+
+                        except Exception as exc:
+
+                            print(
+                                f"[WARN] "
+                                f"Speed adjustment failed: "
+                                f"{exc}"
+                            )
+
                     print("")
                     print(
-                        f"[PLAY] Starting chunk "
-                        f"{chunk_index}/"
-                        f"{chunk_count}"
+                        f"[PLAY] Starting block "
+                        f"{block_index}/"
+                        f"{block_count}"
                     )
 
-                    start = (
-                        time.perf_counter()
-                    )
+                    # ---------------------------------------------------------
+                    # Strict sequential playback.
+                    #
+                    # No next block begins until this returns.
+                    # ---------------------------------------------------------
 
                     sd.play(
-                        audio,
+                        playback_audio,
                         sample_rate,
                     )
 
-                    # -------------------------------------------------
-                    # CRITICAL:
-                    #
-                    # Block until THIS chunk is fully played.
-                    #
-                    # Chunk 2 cannot start before this returns.
-                    # -------------------------------------------------
-
                     sd.wait()
 
-                    playback_ms = (
-                        time.perf_counter()
-                        - start
-                    ) * 1000
-
                     print(
-                        f"[PLAY] Finished chunk "
-                        f"{chunk_index}/"
-                        f"{chunk_count} "
-                        f"({playback_ms:.2f} ms)"
+                        f"[PLAY] Finished block "
+                        f"{block_index}/"
+                        f"{block_count}"
                     )
 
                     playback_queue.task_done()
@@ -449,32 +416,124 @@ def handle_long_stream(
         except Exception as exc:
 
             print(
-                f"Playback unavailable: {exc}"
+                f"Playback disabled: {exc}"
             )
 
             playback_enabled = False
 
-    # =================================================================
-    # Progressive WAV writer
-    # =================================================================
+    # =========================================================================
+    # MULTIPART REQUEST
+    # =========================================================================
+
+    request_start = (
+        time.perf_counter()
+    )
+
+    reference_handle = open(
+        reference_audio_path,
+        "rb",
+    )
+
+    try:
+
+        files = {
+            "reference_audio": (
+                reference_audio_path.name,
+                reference_handle,
+                "audio/wav",
+            )
+        }
+
+        data = {
+            "text":
+                text,
+
+            "reference_text":
+                reference_text,
+
+            "max_new_tokens":
+                str(
+                    args.max_new_tokens
+                ),
+        }
+
+        response = requests.post(
+            url,
+            data=data,
+            files=files,
+            stream=True,
+            timeout=args.timeout,
+        )
+
+    except requests.RequestException as exc:
+
+        reference_handle.close()
+
+        print(
+            f"Request failed: {exc}"
+        )
+
+        sys.exit(1)
+
+    finally:
+
+        reference_handle.close()
+
+    headers_received = (
+        time.perf_counter()
+    )
+
+    if response.status_code != 200:
+
+        print(
+            f"Request failed "
+            f"({response.status_code}): "
+            f"{response.text}"
+        )
+
+        sys.exit(1)
+
+    # =========================================================================
+    # FINAL WAV WRITER
+    # =========================================================================
+
+    output_path = Path(
+        args.output
+    )
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     wav_writer = sf.SoundFile(
         str(
             output_path
         ),
+
         mode="w",
+
         samplerate=44100,
+
         channels=1,
+
         subtype="PCM_16",
+
         format="WAV",
     )
 
-    first_audio_time = None
-    last_audio_received = None
+    complete_audio_parts = []
 
-    chunk_counter = 0
+    first_audio_time = None
+    receive_complete_time = None
+
+    block_counter = 0
 
     server_metrics = {}
+
+    # =========================================================================
+    # RECEIVE STREAM
+    # =========================================================================
 
     try:
 
@@ -492,92 +551,90 @@ def handle_long_stream(
                 )
             )
 
-            # =========================================================
+            # =================================================================
             # AUDIO
-            # =========================================================
+            # =================================================================
 
             if frame_type == "audio":
 
-                chunk_counter += 1
-
-                now = (
-                    time.perf_counter()
-                )
+                block_counter += 1
 
                 if first_audio_time is None:
 
-                    first_audio_time = now
-
-                last_audio_received = now
-
-                # -----------------------------------------------------
-                # PCM16 -> float32
-                # -----------------------------------------------------
+                    first_audio_time = (
+                        time.perf_counter()
+                    )
 
                 pcm = np.frombuffer(
                     pcm_bytes,
                     dtype="<i2",
                 )
 
-                float_audio = (
+                audio = (
                     pcm.astype(
                         np.float32
                     )
                     / 32767.0
                 )
 
-                # -----------------------------------------------------
-                # Save immediately to final WAV.
-                # -----------------------------------------------------
+                # -------------------------------------------------------------
+                # Append directly to ONE final WAV.
+                # -------------------------------------------------------------
 
                 wav_writer.write(
-                    float_audio
+                    audio
+                )
+
+                complete_audio_parts.append(
+                    audio.copy()
                 )
 
                 print("")
                 print(
-                    f"[RECV] Chunk "
-                    f"{metadata['chunk_index']}/"
-                    f"{metadata['chunk_count']}"
+                    f"[RECV] Block "
+                    f"{metadata['block_index']}/"
+                    f"{metadata['block_count']}"
                 )
 
                 print(
-                    f"       Audio duration : "
+                    f"       Duration  : "
                     f"{metadata['audio_duration_s']:.2f}s"
                 )
 
                 print(
-                    f"       Inference      : "
-                    f"{metadata['inference_ms']:.2f} ms"
+                    f"       Inference : "
+                    f"{metadata['inference_ms']:.2f}ms"
                 )
 
-                # -----------------------------------------------------
-                # QUEUE.
+                # -------------------------------------------------------------
+                # Queue playback.
                 #
-                # Even if this chunk arrives while another chunk
-                # is playing, it only waits here.
-                # -----------------------------------------------------
+                # Even if later blocks arrive quickly, they wait.
+                # -------------------------------------------------------------
 
                 if playback_enabled:
 
                     playback_queue.put(
                         (
                             metadata[
-                                "chunk_index"
+                                "block_index"
                             ],
+
                             metadata[
-                                "chunk_count"
+                                "block_count"
                             ],
-                            float_audio.copy(),
+
+                            audio.copy(),
+
                             metadata[
                                 "sample_rate"
                             ],
                         )
                     )
 
-            # =========================================================
+            # =================================================================
             # END
-            # =========================================================
+            # =================================================================
 
             elif frame_type == "end":
 
@@ -591,18 +648,13 @@ def handle_long_stream(
 
         wav_writer.close()
 
-    network_done_time = (
+    receive_complete_time = (
         time.perf_counter()
     )
 
-    # =================================================================
-    # IMPORTANT:
-    #
-    # Server might already be finished generating all chunks,
-    # but the client may still be playing queued audio.
-    #
-    # Wait for all playback to finish.
-    # =================================================================
+    # =========================================================================
+    # WAIT FOR ALL PLAYBACK
+    # =========================================================================
 
     if playback_enabled:
 
@@ -620,39 +672,101 @@ def handle_long_stream(
                 timeout=10,
             )
 
-    playback_done_time = (
+    playback_complete_time = (
         time.perf_counter()
     )
 
-    if first_audio_time is None:
+    # =========================================================================
+    # OPTIONAL FINAL SPEED-ADJUSTED FILE
+    # =========================================================================
 
-        print(
-            "No audio was received."
-        )
+    adjusted_path = None
 
-        return
+    if (
+        args.save_adjusted
+        and
+        args.speed != 1.0
+        and
+        complete_audio_parts
+    ):
 
-    # =================================================================
-    # Metrics
-    # =================================================================
+        try:
+
+            import librosa
+
+            full_audio = np.concatenate(
+                complete_audio_parts
+            )
+
+            adjusted_audio = (
+                librosa
+                .effects
+                .time_stretch(
+                    full_audio,
+                    rate=args.speed,
+                )
+            )
+
+            speed_name = (
+                str(args.speed)
+                .replace(
+                    ".",
+                    "_",
+                )
+            )
+
+            adjusted_path = (
+                output_path.with_name(
+                    output_path.stem
+                    + "_speed_"
+                    + speed_name
+                    + output_path.suffix
+                )
+            )
+
+            sf.write(
+                str(
+                    adjusted_path
+                ),
+                adjusted_audio,
+                44100,
+                subtype="PCM_16",
+            )
+
+        except Exception as exc:
+
+            print(
+                f"Adjusted WAV save failed: "
+                f"{exc}"
+            )
+
+    # =========================================================================
+    # METRICS
+    # =========================================================================
 
     ttfb_ms = (
         headers_received
         - request_start
     ) * 1000
 
-    ttfa_ms = (
-        first_audio_time
+    if first_audio_time is not None:
+
+        ttfa_ms = (
+            first_audio_time
+            - request_start
+        ) * 1000
+
+    else:
+
+        ttfa_ms = 0.0
+
+    receive_total_ms = (
+        receive_complete_time
         - request_start
     ) * 1000
 
-    network_total_ms = (
-        network_done_time
-        - request_start
-    ) * 1000
-
-    complete_total_ms = (
-        playback_done_time
+    playback_total_ms = (
+        playback_complete_time
         - request_start
     ) * 1000
 
@@ -662,306 +776,119 @@ def handle_long_stream(
     print("=" * 80)
 
     print(
-        f"HTTP headers / TTFB  : "
+        f"HTTP headers / TTFB : "
         f"{ttfb_ms:.2f} ms"
     )
 
     print(
-        f"TTFT / TTFA          : "
+        f"TTFA / TTFT         : "
         f"{ttfa_ms:.2f} ms"
     )
 
     print(
-        f"Generation/receive   : "
-        f"{network_total_ms:.2f} ms"
+        f"Receive total       : "
+        f"{receive_total_ms:.2f} ms"
     )
 
     if args.play:
 
         print(
-            f"E2E incl playback    : "
-            f"{complete_total_ms:.2f} ms"
+            f"E2E incl playback   : "
+            f"{playback_total_ms:.2f} ms"
         )
 
     print(
-        f"Chunks received      : "
-        f"{chunk_counter}"
+        f"Blocks received     : "
+        f"{block_counter}"
     )
 
     print("")
     print("=" * 80)
-    print("SERVER LATENCY")
+    print("SERVER METRICS")
     print("=" * 80)
 
     print(
-        f"Preprocess           : "
+        f"Blocks              : "
+        f"{server_metrics.get('block_count', 0)}"
+    )
+
+    print(
+        f"Preprocess          : "
         f"{server_metrics.get('preprocess_ms', 0):.2f} ms"
     )
 
     print(
-        f"Inference            : "
+        f"Inference           : "
         f"{server_metrics.get('inference_ms', 0):.2f} ms"
     )
 
     print(
-        f"Decode               : "
+        f"Decode              : "
         f"{server_metrics.get('decode_ms', 0):.2f} ms"
     )
 
     print(
-        f"SERVER TOTAL         : "
+        f"SERVER TOTAL        : "
         f"{server_metrics.get('server_total_ms', 0):.2f} ms"
     )
 
     print(
-        f"Audio duration       : "
-        f"{server_metrics.get('audio_duration_s', 0):.3f}s"
+        f"Audio duration      : "
+        f"{server_metrics.get('audio_duration_s', 0):.2f}s"
     )
 
     print(
-        f"Generation RTF       : "
+        f"Generation RTF      : "
         f"{server_metrics.get('generation_rtf', 0):.4f}"
     )
 
     print(
-        f"Total RTF            : "
+        f"Total RTF           : "
         f"{server_metrics.get('total_rtf', 0):.4f}"
     )
 
     print(
-        f"GPU allocated        : "
+        f"GPU allocated       : "
         f"{server_metrics.get('gpu_allocated_mb', 0):.2f} MB"
     )
 
     print(
-        f"GPU reserved         : "
+        f"GPU reserved        : "
         f"{server_metrics.get('gpu_reserved_mb', 0):.2f} MB"
     )
 
     print(
-        f"GPU peak             : "
+        f"GPU peak            : "
         f"{server_metrics.get('gpu_peak_mb', 0):.2f} MB"
     )
 
     print("")
     print("=" * 80)
-    print("AUDIO")
+    print("OUTPUT")
     print("=" * 80)
 
     print(
-        f"Saved                : "
+        f"Original WAV        : "
         f"{output_path}"
     )
 
-    print(
-        f"Seed                 : "
-        f"{args.seed}"
-    )
-
-    print(
-        f"Chunks               : "
-        f"{chunk_counter}"
-    )
-
-    print("=" * 80)
-
-
-# =============================================================================
-# MAIN
-# =============================================================================
-
-def main():
-
-    parser = argparse.ArgumentParser(
-        description=(
-            "Dia TTS Client"
-        )
-    )
-
-    parser.add_argument(
-        "--server",
-        default=(
-            "http://localhost:8000"
-        ),
-    )
-
-    parser.add_argument(
-        "--text",
-        default=None,
-    )
-
-    parser.add_argument(
-        "--text-file",
-        default=None,
-        help=(
-            "Read full transcript "
-            "from a text file."
-        ),
-    )
-
-    parser.add_argument(
-        "--output",
-        default="output.wav",
-    )
-
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=1234,
-        help=(
-            "Dia RNG seed controlling "
-            "the generated S1/S2 voice pair."
-        ),
-    )
-
-    parser.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=2048,
-    )
-
-    parser.add_argument(
-        "--play",
-        action="store_true",
-    )
-
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=1800,
-    )
-
-    args = parser.parse_args()
-
-    text = load_text(
-        args
-    )
-
-    url = (
-        args.server.rstrip("/")
-        + "/tts"
-    )
-
-    payload = {
-
-        "text":
-            text,
-
-        "seed":
-            args.seed,
-
-        "max_new_tokens":
-            args.max_new_tokens,
-    }
-
-    print("")
-    print("=" * 80)
-    print("DIA TTS CLIENT")
-    print("=" * 80)
-
-    print(
-        f"Server            : {url}"
-    )
-
-    print(
-        "Speaker mapping   : "
-        "[S1]=Agent, [S2]=Customer"
-    )
-
-    print(
-        f"Seed              : "
-        f"{args.seed}"
-    )
-
-    print(
-        f"Words             : "
-        f"{len(text.split())}"
-    )
-
-    print(
-        f"Output            : "
-        f"{args.output}"
-    )
-
-    print(
-        f"Play              : "
-        f"{args.play}"
-    )
-
-    print("=" * 80)
-
-    request_start = (
-        time.perf_counter()
-    )
-
-    try:
-
-        response = requests.post(
-            url,
-            json=payload,
-            stream=True,
-            timeout=args.timeout,
-        )
-
-    except requests.RequestException as exc:
+    if adjusted_path:
 
         print(
-            f"Request failed: {exc}"
+            f"Adjusted WAV        : "
+            f"{adjusted_path}"
         )
 
-        sys.exit(1)
-
-    headers_received = (
-        time.perf_counter()
-    )
-
-    if response.status_code != 200:
-
-        print(
-            f"Request failed "
-            f"({response.status_code}): "
-            f"{response.text}"
-        )
-
-        sys.exit(1)
-
-    stream_mode = (
-        response.headers.get(
-            "X-Stream-Mode",
-            "wav",
-        )
+    print(
+        f"Reference WAV       : "
+        f"{reference_audio_path}"
     )
 
     print(
-        f"Response mode     : "
-        f"{stream_mode}"
+        f"Reference voices    : enabled"
     )
 
-    # =================================================================
-    # LONG
-    # =================================================================
-
-    if stream_mode == "pcm":
-
-        handle_long_stream(
-            response,
-            args,
-            request_start,
-            headers_received,
-        )
-
-    # =================================================================
-    # SHORT
-    # =================================================================
-
-    else:
-
-        handle_short_wav(
-            response,
-            args,
-            request_start,
-            headers_received,
-        )
+    print("=" * 80)
 
 
 if __name__ == "__main__":
