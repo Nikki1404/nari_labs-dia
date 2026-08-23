@@ -1625,3 +1625,4 @@ python client.py --server http://localhost:8000 --text-file full_call.txt --seed
 python client.py --server http://localhost:8000 --text-file full_call.txt --seed 8472 --max-new-tokens 16384 --output full_call_seed_8472.wav --play
 python client.py --server http://localhost:8000 --text-file full_call.txt --seed 8472 --max-new-tokens 12288 --output full_call.wav --speed 0.85 --save-adjusted --play
 $seeds=@(); while($seeds.Count -lt 25){$seeds+=Get-Random -Minimum 1000 -Maximum 45001;$seeds=@($seeds|Sort-Object -Unique)}; foreach($seed in $seeds){Write-Host "Generating seed $seed"; python client.py --server http://localhost:8000 --text-file full_call.txt --seed $seed --max-new-tokens 12288 --output "full_call_seed_$seed.wav"}
+python client.py --server http://<SERVER-IP>:8000 --text-file full_call.txt --reference-audio reference.wav --reference-text reference.txt --max-new-tokens 3072 --output full_call.wav --play
