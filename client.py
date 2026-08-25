@@ -1,3 +1,5 @@
+# client.py
+
 #!/usr/bin/env python3
 
 import argparse
@@ -20,15 +22,12 @@ import soundfile as sf
 # =============================================================================
 
 def read_text_file(path_value):
-
     path = Path(path_value)
 
     if not path.exists():
-
         print(
             f"File not found: {path}"
         )
-
         sys.exit(1)
 
     return path.read_text(
@@ -41,18 +40,14 @@ def safe_float(
     key,
     default=0.0,
 ):
-
     try:
-
         return float(
             headers.get(
                 key,
                 default,
             )
         )
-
     except Exception:
-
         return default
 
 
@@ -60,28 +55,28 @@ def receive_exact(
     raw,
     size,
 ):
-
     data = bytearray()
 
     while len(data) < size:
-
         part = raw.read(
             size - len(data)
         )
 
         if not part:
-
             raise EOFError(
                 "Server stream ended unexpectedly."
             )
 
-        data.extend(part)
+        data.extend(
+            part
+        )
 
-    return bytes(data)
+    return bytes(
+        data
+    )
 
 
 def read_frame(raw):
-
     metadata_size = struct.unpack(
         ">I",
         receive_exact(
@@ -110,7 +105,6 @@ def read_frame(raw):
     pcm_bytes = b""
 
     if pcm_size > 0:
-
         pcm_bytes = receive_exact(
             raw,
             pcm_size,
@@ -130,13 +124,10 @@ def adjust_speed(
     audio,
     speed,
 ):
-
     if speed == 1.0:
-
         return audio
 
     try:
-
         import librosa
 
         return (
@@ -149,7 +140,6 @@ def adjust_speed(
         )
 
     except Exception as exc:
-
         print(
             f"[WARN] Speed adjustment "
             f"failed: {exc}"
@@ -162,9 +152,7 @@ def play_audio_file(
     path,
     speed,
 ):
-
     try:
-
         import sounddevice as sd
 
         audio, sr = sf.read(
@@ -177,12 +165,6 @@ def play_audio_file(
             speed,
         )
 
-        print("")
-        print(
-            f"Playing at speed="
-            f"{speed}..."
-        )
-
         sd.play(
             audio,
             sr,
@@ -190,12 +172,7 @@ def play_audio_file(
 
         sd.wait()
 
-        print(
-            "Playback complete."
-        )
-
     except Exception as exc:
-
         print(
             f"Playback failed: "
             f"{exc}"
@@ -207,28 +184,21 @@ def play_audio_file(
 # =============================================================================
 
 def run_seed_mode(args):
-
     if args.text_file:
-
         text = read_text_file(
             args.text_file
         )
 
     elif args.text:
-
         text = args.text.strip()
 
     else:
-
         print(
             "Seed mode requires "
             "--text or --text-file."
         )
-
         sys.exit(1)
 
-    # IMPORTANT:
-    # Seed mode goes to /tts_seed.
     url = (
         args.server.rstrip("/")
         + "/tts_seed"
@@ -250,35 +220,15 @@ def run_seed_mode(args):
     print("DIA SEED TEST MODE")
     print("=" * 80)
 
-    print(
-        f"Server            : "
-        f"{url}"
-    )
-
-    print(
-        f"Seed              : "
-        f"{args.seed}"
-    )
-
-    print(
-        f"Words             : "
-        f"{len(text.split())}"
-    )
-
+    print(f"Server            : {url}")
+    print(f"Seed              : {args.seed}")
+    print(f"Words             : {len(text.split())}")
     print(
         f"Max new tokens    : "
         f"{args.max_new_tokens}"
     )
-
-    print(
-        f"Output            : "
-        f"{args.output}"
-    )
-
-    print(
-        f"Play              : "
-        f"{args.play}"
-    )
+    print(f"Output            : {args.output}")
+    print(f"Play              : {args.play}")
 
     print("=" * 80)
 
@@ -287,7 +237,6 @@ def run_seed_mode(args):
     )
 
     try:
-
         response = requests.post(
             url,
             json=payload,
@@ -295,12 +244,9 @@ def run_seed_mode(args):
         )
 
     except requests.RequestException as exc:
-
         print(
-            f"Request failed: "
-            f"{exc}"
+            f"Request failed: {exc}"
         )
-
         sys.exit(1)
 
     headers_received = (
@@ -308,13 +254,11 @@ def run_seed_mode(args):
     )
 
     if response.status_code != 200:
-
         print(
             f"Request failed "
             f"({response.status_code}): "
             f"{response.text}"
         )
-
         sys.exit(1)
 
     audio_bytes = (
@@ -324,14 +268,6 @@ def run_seed_mode(args):
     first_audio_time = (
         time.perf_counter()
     )
-
-    if not audio_bytes:
-
-        print(
-            "No audio returned."
-        )
-
-        sys.exit(1)
 
     output_path = Path(
         args.output
@@ -347,23 +283,17 @@ def run_seed_mode(args):
     )
 
     with sf.SoundFile(
-        io.BytesIO(
-            audio_bytes
-        )
+        io.BytesIO(audio_bytes)
     ) as wav:
-
-        sample_rate = wav.samplerate
-        channels = wav.channels
-        frames = len(wav)
-
         duration = (
-            frames
-            / sample_rate
+            len(wav)
+            / wav.samplerate
         )
 
-    request_end = (
+    total_ms = (
         time.perf_counter()
-    )
+        - request_start
+    ) * 1000
 
     ttfb_ms = (
         headers_received
@@ -372,11 +302,6 @@ def run_seed_mode(args):
 
     ttfa_ms = (
         first_audio_time
-        - request_start
-    ) * 1000
-
-    total_ms = (
-        request_end
         - request_start
     ) * 1000
 
@@ -400,55 +325,14 @@ def run_seed_mode(args):
         f"{total_ms:.2f} ms"
     )
 
-    print("")
-    print("=" * 80)
-    print("SERVER LATENCY")
-    print("=" * 80)
-
-    print(
-        f"Preprocess        : "
-        f"{safe_float(response.headers, 'X-Preprocess-Time-MS'):.2f} ms"
-    )
-
-    print(
-        f"Inference         : "
-        f"{safe_float(response.headers, 'X-Inference-Time-MS'):.2f} ms"
-    )
-
-    print(
-        f"Decode            : "
-        f"{safe_float(response.headers, 'X-Decode-Time-MS'):.2f} ms"
-    )
-
-    print(
-        f"SERVER TOTAL      : "
-        f"{safe_float(response.headers, 'X-Server-Total-MS'):.2f} ms"
-    )
-
     print(
         f"Audio duration    : "
-        f"{duration:.3f} sec"
-    )
-
-    print("")
-    print("=" * 80)
-    print("OUTPUT")
-    print("=" * 80)
-
-    print(
-        f"Saved             : "
-        f"{output_path}"
-    )
-
-    print(
-        f"Seed              : "
-        f"{args.seed}"
+        f"{duration:.3f}s"
     )
 
     print("=" * 80)
 
     if args.play:
-
         play_audio_file(
             output_path,
             args.speed,
@@ -460,34 +344,6 @@ def run_seed_mode(args):
 # =============================================================================
 
 def run_reference_mode(args):
-
-    if not args.text_file:
-
-        print(
-            "Reference mode requires "
-            "--text-file."
-        )
-
-        sys.exit(1)
-
-    if not args.reference_audio:
-
-        print(
-            "Reference mode requires "
-            "--reference-audio."
-        )
-
-        sys.exit(1)
-
-    if not args.reference_text:
-
-        print(
-            "Reference mode requires "
-            "--reference-text."
-        )
-
-        sys.exit(1)
-
     transcript_path = Path(
         args.text_file
     )
@@ -505,14 +361,11 @@ def run_reference_mode(args):
         reference_audio_path,
         reference_text_path,
     ]:
-
         if not path.exists():
-
             print(
                 f"File not found: "
                 f"{path}"
             )
-
             sys.exit(1)
 
     text = read_text_file(
@@ -587,25 +440,19 @@ def run_reference_mode(args):
     playback_thread = None
 
     if args.play:
-
         try:
-
             import sounddevice as sd
 
             playback_enabled = True
 
             def playback_worker():
-
                 while True:
-
                     item = (
                         playback_queue.get()
                     )
 
                     if item is None:
-
                         playback_queue.task_done()
-
                         break
 
                     (
@@ -624,8 +471,7 @@ def run_reference_mode(args):
 
                     print("")
                     print(
-                        f"[PLAY] Starting "
-                        f"block "
+                        f"[PLAY] Starting block "
                         f"{block_index}/"
                         f"{block_count}"
                     )
@@ -635,12 +481,10 @@ def run_reference_mode(args):
                         sample_rate,
                     )
 
-                    # Strict sequential playback.
                     sd.wait()
 
                     print(
-                        f"[PLAY] Finished "
-                        f"block "
+                        f"[PLAY] Finished block "
                         f"{block_index}/"
                         f"{block_count}"
                     )
@@ -657,7 +501,6 @@ def run_reference_mode(args):
             playback_thread.start()
 
         except Exception as exc:
-
             print(
                 f"Playback disabled: "
                 f"{exc}"
@@ -666,7 +509,7 @@ def run_reference_mode(args):
             playback_enabled = False
 
     # =========================================================================
-    # MULTIPART HTTP
+    # REQUEST
     # =========================================================================
 
     request_start = (
@@ -674,16 +517,15 @@ def run_reference_mode(args):
     )
 
     try:
-
         with open(
             reference_audio_path,
             "rb",
-        ) as handle:
+        ) as reference_handle:
 
             files = {
                 "reference_audio": (
                     reference_audio_path.name,
-                    handle,
+                    reference_handle,
                     "audio/wav",
                 )
             }
@@ -710,12 +552,9 @@ def run_reference_mode(args):
             )
 
     except requests.RequestException as exc:
-
         print(
-            f"Request failed: "
-            f"{exc}"
+            f"Request failed: {exc}"
         )
-
         sys.exit(1)
 
     headers_received = (
@@ -723,17 +562,15 @@ def run_reference_mode(args):
     )
 
     if response.status_code != 200:
-
         print(
             f"Request failed "
             f"({response.status_code}): "
             f"{response.text}"
         )
-
         sys.exit(1)
 
     # =========================================================================
-    # OUTPUT WRITER
+    # OUTPUT
     # =========================================================================
 
     output_path = Path(
@@ -747,15 +584,10 @@ def run_reference_mode(args):
 
     wav_writer = sf.SoundFile(
         str(output_path),
-
         mode="w",
-
         samplerate=44100,
-
         channels=1,
-
         subtype="PCM_16",
-
         format="WAV",
     )
 
@@ -766,9 +598,7 @@ def run_reference_mode(args):
     server_metrics = {}
 
     try:
-
         while True:
-
             metadata, pcm_bytes = (
                 read_frame(
                     response.raw
@@ -782,11 +612,9 @@ def run_reference_mode(args):
             )
 
             if frame_type == "audio":
-
                 block_counter += 1
 
                 if first_audio_time is None:
-
                     first_audio_time = (
                         time.perf_counter()
                     )
@@ -829,7 +657,6 @@ def run_reference_mode(args):
                 )
 
                 if playback_enabled:
-
                     playback_queue.put(
                         (
                             metadata[
@@ -849,27 +676,17 @@ def run_reference_mode(args):
                     )
 
             elif frame_type == "end":
-
-                server_metrics = (
-                    metadata
-                )
-
+                server_metrics = metadata
                 break
 
     finally:
-
         wav_writer.close()
 
     receive_complete_time = (
         time.perf_counter()
     )
 
-    # =========================================================================
-    # WAIT FOR PLAYBACK
-    # =========================================================================
-
     if playback_enabled:
-
         playback_queue.join()
 
         playback_queue.put(
@@ -879,18 +696,13 @@ def run_reference_mode(args):
         playback_queue.join()
 
         if playback_thread:
-
             playback_thread.join(
-                timeout=10
+                timeout=10,
             )
 
     playback_complete_time = (
         time.perf_counter()
     )
-
-    # =========================================================================
-    # OPTIONAL ADJUSTED FILE
-    # =========================================================================
 
     adjusted_path = None
 
@@ -901,7 +713,6 @@ def run_reference_mode(args):
         and
         complete_audio_parts
     ):
-
         full_audio = np.concatenate(
             complete_audio_parts
         )
@@ -936,10 +747,6 @@ def run_reference_mode(args):
             44100,
             subtype="PCM_16",
         )
-
-    # =========================================================================
-    # METRICS
-    # =========================================================================
 
     ttfb_ms = (
         headers_received
@@ -987,7 +794,6 @@ def run_reference_mode(args):
     )
 
     if args.play:
-
         print(
             f"E2E incl playback   : "
             f"{playback_total_ms:.2f} ms"
@@ -1038,11 +844,6 @@ def run_reference_mode(args):
         f"{server_metrics.get('generation_rtf', 0):.4f}"
     )
 
-    print(
-        f"GPU peak            : "
-        f"{server_metrics.get('gpu_peak_mb', 0):.2f} MB"
-    )
-
     print("")
     print("=" * 80)
     print("OUTPUT")
@@ -1054,7 +855,6 @@ def run_reference_mode(args):
     )
 
     if adjusted_path:
-
         print(
             f"Adjusted WAV        : "
             f"{adjusted_path}"
@@ -1068,7 +868,6 @@ def run_reference_mode(args):
 # =============================================================================
 
 def main():
-
     parser = argparse.ArgumentParser(
         description=(
             "Dia TTS client: "
@@ -1144,25 +943,19 @@ def main():
     args = parser.parse_args()
 
     if args.speed <= 0:
-
         print(
             "--speed must be > 0"
         )
-
         sys.exit(1)
 
-    # =========================================================================
-    # REFERENCE MODE
-    # =========================================================================
-
+    # Reference mode
     if (
         args.reference_audio is not None
         or
         args.reference_text is not None
     ):
-
         if args.max_new_tokens is None:
-            args.max_new_tokens = 4096
+            args.max_new_tokens = 3072
 
         run_reference_mode(
             args
@@ -1170,12 +963,8 @@ def main():
 
         return
 
-    # =========================================================================
-    # SEED MODE
-    # =========================================================================
-
+    # Seed mode
     if args.seed is not None:
-
         if args.max_new_tokens is None:
             args.max_new_tokens = 1024
 
@@ -1185,30 +974,8 @@ def main():
 
         return
 
-    print("")
     print(
-        "Choose one mode:"
-    )
-
-    print("")
-    print(
-        "Seed mode:"
-    )
-
-    print(
-        "  --seed <number> "
-        "--text \"[S1] ... [S2] ...\""
-    )
-
-    print("")
-    print(
-        "Reference mode:"
-    )
-
-    print(
-        "  --text-file full_call.txt "
-        "--reference-audio reference.wav "
-        "--reference-text reference.txt"
+        "Choose seed mode or reference mode."
     )
 
     sys.exit(1)
