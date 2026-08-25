@@ -15,12 +15,10 @@ import soundfile as sf
 
 
 # =============================================================================
-# FILE HELPERS
+# TEXT
 # =============================================================================
 
-def read_text_file(
-    path_value,
-):
+def read_text_file(path_value):
 
     path = Path(
         path_value
@@ -29,7 +27,8 @@ def read_text_file(
     if not path.exists():
 
         print(
-            f"File not found: {path}"
+            f"File not found: "
+            f"{path}"
         )
 
         sys.exit(1)
@@ -39,8 +38,36 @@ def read_text_file(
     ).strip()
 
 
+def get_input_text(args):
+
+    # -------------------------------------------------------------------------
+    # File mode
+    # -------------------------------------------------------------------------
+
+    if args.text_file:
+
+        return read_text_file(
+            args.text_file
+        )
+
+    # -------------------------------------------------------------------------
+    # Direct CLI text
+    # -------------------------------------------------------------------------
+
+    if args.text:
+
+        return args.text.strip()
+
+    print(
+        "Provide either "
+        "--text or --text-file."
+    )
+
+    sys.exit(1)
+
+
 # =============================================================================
-# NETWORK STREAM HELPERS
+# STREAM
 # =============================================================================
 
 def receive_exact(
@@ -59,7 +86,8 @@ def receive_exact(
         if not part:
 
             raise EOFError(
-                "Server stream ended unexpectedly."
+                "Server stream "
+                "ended unexpectedly."
             )
 
         data.extend(
@@ -73,7 +101,6 @@ def receive_exact(
 
 def read_frame(raw):
 
-    # JSON metadata size.
     metadata_size = struct.unpack(
         ">I",
         receive_exact(
@@ -82,7 +109,6 @@ def read_frame(raw):
         ),
     )[0]
 
-    # JSON metadata.
     metadata = json.loads(
         receive_exact(
             raw,
@@ -92,7 +118,6 @@ def read_frame(raw):
         )
     )
 
-    # Audio byte count.
     pcm_size = struct.unpack(
         ">Q",
         receive_exact(
@@ -103,7 +128,7 @@ def read_frame(raw):
 
     pcm_bytes = b""
 
-    if pcm_size > 0:
+    if pcm_size:
 
         pcm_bytes = receive_exact(
             raw,
@@ -117,6 +142,41 @@ def read_frame(raw):
 
 
 # =============================================================================
+# SPEED
+# =============================================================================
+
+def adjust_speed(
+    audio,
+    speed,
+):
+
+    if speed == 1.0:
+
+        return audio
+
+    try:
+
+        import librosa
+
+        return (
+            librosa.effects
+            .time_stretch(
+                audio,
+                rate=speed,
+            )
+        )
+
+    except Exception as exc:
+
+        print(
+            f"[WARN] Speed change "
+            f"failed: {exc}"
+        )
+
+        return audio
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -124,8 +184,8 @@ def main():
 
     parser = argparse.ArgumentParser(
         description=(
-            "Dia long-text TTS client "
-            "with reference audio conditioning"
+            "Dia reference-conditioned "
+            "TTS client"
         )
     )
 
@@ -134,34 +194,47 @@ def main():
         default="http://localhost:8000",
     )
 
-    parser.add_argument(
-        "--text-file",
-        required=True,
+    # -------------------------------------------------------------------------
+    # Input can be either direct text OR file.
+    # -------------------------------------------------------------------------
+
+    input_group = (
+        parser.add_mutually_exclusive_group(
+            required=True
+        )
+    )
+
+    input_group.add_argument(
+        "--text",
+        default=None,
         help=(
-            "Long [S1]/[S2] transcript."
+            "Direct text such as "
+            "'[S1] Hello. [S2] Hi.'"
+        ),
+    )
+
+    input_group.add_argument(
+        "--text-file",
+        default=None,
+        help=(
+            "TXT file containing "
+            "the complete transcript."
         ),
     )
 
     parser.add_argument(
         "--reference-audio",
         required=True,
-        help=(
-            "Local reference WAV file."
-        ),
     )
 
     parser.add_argument(
         "--reference-text",
         required=True,
-        help=(
-            "TXT containing the exact "
-            "transcript of reference WAV."
-        ),
     )
 
     parser.add_argument(
         "--output",
-        default="full_call.wav",
+        default="output.wav",
     )
 
     parser.add_argument(
@@ -179,11 +252,6 @@ def main():
         "--speed",
         type=float,
         default=1.0,
-        help=(
-            "Client playback speed. "
-            "1.0=original, "
-            "0.9=10%% slower."
-        ),
     )
 
     parser.add_argument(
@@ -199,12 +267,20 @@ def main():
 
     args = parser.parse_args()
 
-    # =========================================================================
-    # VALIDATION
-    # =========================================================================
+    if args.speed <= 0:
 
-    transcript_path = Path(
-        args.text_file
+        print(
+            "--speed must be > 0"
+        )
+
+        sys.exit(1)
+
+    # =============================================================================
+    # INPUT
+    # =============================================================================
+
+    text = get_input_text(
+        args
     )
 
     reference_audio_path = Path(
@@ -215,38 +291,30 @@ def main():
         args.reference_text
     )
 
-    for path in [
-        transcript_path,
-        reference_audio_path,
-        reference_text_path,
-    ]:
-
-        if not path.exists():
-
-            print(
-                f"File not found: {path}"
-            )
-
-            sys.exit(1)
-
-    if args.speed <= 0:
+    if not reference_audio_path.exists():
 
         print(
-            "--speed must be > 0"
+            f"Reference audio "
+            f"not found: "
+            f"{reference_audio_path}"
         )
 
         sys.exit(1)
 
-    # =========================================================================
-    # LOAD TEXT
-    # =========================================================================
+    if not reference_text_path.exists():
 
-    text = read_text_file(
-        transcript_path
-    )
+        print(
+            f"Reference text "
+            f"not found: "
+            f"{reference_text_path}"
+        )
 
-    reference_text = read_text_file(
-        reference_text_path
+        sys.exit(1)
+
+    reference_text = (
+        read_text_file(
+            reference_text_path
+        )
     )
 
     url = (
@@ -259,13 +327,23 @@ def main():
     print("DIA REFERENCE TTS CLIENT")
     print("=" * 80)
 
-    print(
-        f"Server            : {url}"
-    )
+    if args.text_file:
+
+        print(
+            f"Input source      : "
+            f"{args.text_file}"
+        )
+
+    else:
+
+        print(
+            "Input source      : "
+            "CLI --text"
+        )
 
     print(
-        f"Transcript        : "
-        f"{transcript_path}"
+        f"Input words       : "
+        f"{len(text.split())}"
     )
 
     print(
@@ -279,41 +357,25 @@ def main():
     )
 
     print(
-        f"Output            : "
-        f"{args.output}"
-    )
-
-    print(
-        f"Transcript words  : "
-        f"{len(text.split())}"
-    )
-
-    print(
         f"Max new tokens    : "
         f"{args.max_new_tokens}"
     )
 
     print(
-        f"Playback          : "
-        f"{args.play}"
-    )
-
-    print(
-        f"Playback speed    : "
-        f"{args.speed}"
+        f"Output            : "
+        f"{args.output}"
     )
 
     print("=" * 80)
 
-    # =========================================================================
-    # PLAYBACK QUEUE
-    # =========================================================================
+    # =============================================================================
+    # PLAYBACK THREAD
+    # =============================================================================
 
-    playback_queue = (
-        queue.Queue()
-    )
+    playback_queue = queue.Queue()
 
     playback_enabled = False
+
     playback_thread = None
 
     if args.play:
@@ -329,12 +391,14 @@ def main():
                 while True:
 
                     item = (
-                        playback_queue.get()
+                        playback_queue
+                        .get()
                     )
 
                     if item is None:
 
-                        playback_queue.task_done()
+                        playback_queue
+                        .task_done()
 
                         break
 
@@ -346,67 +410,40 @@ def main():
                     ) = item
 
                     playback_audio = (
-                        audio
+                        adjust_speed(
+                            audio,
+                            args.speed,
+                        )
                     )
-
-                    # ---------------------------------------------------------
-                    # OPTIONAL CLIENT-SIDE SPEED ADJUSTMENT
-                    # ---------------------------------------------------------
-
-                    if args.speed != 1.0:
-
-                        try:
-
-                            import librosa
-
-                            playback_audio = (
-                                librosa
-                                .effects
-                                .time_stretch(
-                                    audio,
-                                    rate=args.speed,
-                                )
-                            )
-
-                        except Exception as exc:
-
-                            print(
-                                f"[WARN] "
-                                f"Speed adjustment failed: "
-                                f"{exc}"
-                            )
 
                     print("")
                     print(
-                        f"[PLAY] Starting block "
+                        f"[PLAY] "
                         f"{block_index}/"
                         f"{block_count}"
                     )
-
-                    # ---------------------------------------------------------
-                    # Strict sequential playback.
-                    #
-                    # No next block begins until this returns.
-                    # ---------------------------------------------------------
 
                     sd.play(
                         playback_audio,
                         sample_rate,
                     )
 
+                    # Strictly wait for this block.
                     sd.wait()
 
                     print(
-                        f"[PLAY] Finished block "
+                        f"[PLAY] finished "
                         f"{block_index}/"
                         f"{block_count}"
                     )
 
-                    playback_queue.task_done()
+                    playback_queue
+                    .task_done()
 
             playback_thread = (
                 threading.Thread(
-                    target=playback_worker,
+                    target=
+                        playback_worker,
                     daemon=True,
                 )
             )
@@ -416,68 +453,62 @@ def main():
         except Exception as exc:
 
             print(
-                f"Playback disabled: {exc}"
+                f"Playback disabled: "
+                f"{exc}"
             )
 
-            playback_enabled = False
-
-    # =========================================================================
-    # MULTIPART REQUEST
-    # =========================================================================
+    # =============================================================================
+    # REQUEST
+    # =============================================================================
 
     request_start = (
         time.perf_counter()
     )
 
-    reference_handle = open(
-        reference_audio_path,
-        "rb",
-    )
-
     try:
 
-        files = {
-            "reference_audio": (
-                reference_audio_path.name,
-                reference_handle,
-                "audio/wav",
+        with open(
+            reference_audio_path,
+            "rb",
+        ) as handle:
+
+            files = {
+                "reference_audio": (
+                    reference_audio_path.name,
+                    handle,
+                    "audio/wav",
+                )
+            }
+
+            data = {
+                "text":
+                    text,
+
+                "reference_text":
+                    reference_text,
+
+                "max_new_tokens":
+                    str(
+                        args.max_new_tokens
+                    ),
+            }
+
+            response = requests.post(
+                url,
+                data=data,
+                files=files,
+                stream=True,
+                timeout=args.timeout,
             )
-        }
-
-        data = {
-            "text":
-                text,
-
-            "reference_text":
-                reference_text,
-
-            "max_new_tokens":
-                str(
-                    args.max_new_tokens
-                ),
-        }
-
-        response = requests.post(
-            url,
-            data=data,
-            files=files,
-            stream=True,
-            timeout=args.timeout,
-        )
 
     except requests.RequestException as exc:
 
-        reference_handle.close()
-
         print(
-            f"Request failed: {exc}"
+            f"Request failed: "
+            f"{exc}"
         )
 
         sys.exit(1)
-
-    finally:
-
-        reference_handle.close()
 
     headers_received = (
         time.perf_counter()
@@ -493,9 +524,9 @@ def main():
 
         sys.exit(1)
 
-    # =========================================================================
-    # FINAL WAV WRITER
-    # =========================================================================
+    # =============================================================================
+    # WAV
+    # =============================================================================
 
     output_path = Path(
         args.output
@@ -510,50 +541,35 @@ def main():
         str(
             output_path
         ),
-
         mode="w",
-
         samplerate=44100,
-
         channels=1,
-
         subtype="PCM_16",
-
         format="WAV",
     )
 
     complete_audio_parts = []
 
     first_audio_time = None
-    receive_complete_time = None
-
-    block_counter = 0
 
     server_metrics = {}
 
-    # =========================================================================
-    # RECEIVE STREAM
-    # =========================================================================
+    block_counter = 0
 
     try:
 
         while True:
 
-            metadata, pcm_bytes = (
-                read_frame(
-                    response.raw
-                )
+            (
+                metadata,
+                pcm_bytes,
+            ) = read_frame(
+                response.raw
             )
 
-            frame_type = (
-                metadata.get(
-                    "type"
-                )
+            frame_type = metadata.get(
+                "type"
             )
-
-            # =================================================================
-            # AUDIO
-            # =================================================================
 
             if frame_type == "audio":
 
@@ -577,9 +593,9 @@ def main():
                     / 32767.0
                 )
 
-                # -------------------------------------------------------------
-                # Append directly to ONE final WAV.
-                # -------------------------------------------------------------
+                # =====================================================
+                # Append to ONE final WAV.
+                # =====================================================
 
                 wav_writer.write(
                     audio
@@ -591,26 +607,25 @@ def main():
 
                 print("")
                 print(
-                    f"[RECV] Block "
+                    f"[RECV] "
                     f"{metadata['block_index']}/"
                     f"{metadata['block_count']}"
                 )
 
                 print(
-                    f"       Duration  : "
-                    f"{metadata['audio_duration_s']:.2f}s"
+                    f"       words      : "
+                    f"{metadata.get('block_words')}"
                 )
 
                 print(
-                    f"       Inference : "
-                    f"{metadata['inference_ms']:.2f}ms"
+                    f"       text       : "
+                    f"{metadata.get('block_text')}"
                 )
 
-                # -------------------------------------------------------------
-                # Queue playback.
-                #
-                # Even if later blocks arrive quickly, they wait.
-                # -------------------------------------------------------------
+                print(
+                    f"       audio      : "
+                    f"{metadata['audio_duration_s']:.2f}s"
+                )
 
                 if playback_enabled:
 
@@ -632,10 +647,6 @@ def main():
                         )
                     )
 
-            # =================================================================
-            # END
-            # =================================================================
-
             elif frame_type == "end":
 
                 server_metrics = (
@@ -652,9 +663,9 @@ def main():
         time.perf_counter()
     )
 
-    # =========================================================================
-    # WAIT FOR ALL PLAYBACK
-    # =========================================================================
+    # =============================================================================
+    # PLAYBACK FINISH
+    # =============================================================================
 
     if playback_enabled:
 
@@ -669,18 +680,12 @@ def main():
         if playback_thread:
 
             playback_thread.join(
-                timeout=10,
+                timeout=10
             )
 
-    playback_complete_time = (
-        time.perf_counter()
-    )
-
-    # =========================================================================
-    # OPTIONAL FINAL SPEED-ADJUSTED FILE
-    # =========================================================================
-
-    adjusted_path = None
+    # =============================================================================
+    # OPTIONAL SPEED-ADJUSTED OUTPUT
+    # =============================================================================
 
     if (
         args.save_adjusted
@@ -690,83 +695,64 @@ def main():
         complete_audio_parts
     ):
 
-        try:
+        full_audio = np.concatenate(
+            complete_audio_parts
+        )
 
-            import librosa
+        adjusted_audio = adjust_speed(
+            full_audio,
+            args.speed,
+        )
 
-            full_audio = np.concatenate(
-                complete_audio_parts
+        speed_name = str(
+            args.speed
+        ).replace(
+            ".",
+            "_",
+        )
+
+        adjusted_path = (
+            output_path.with_name(
+                output_path.stem
+                + "_speed_"
+                + speed_name
+                + output_path.suffix
             )
+        )
 
-            adjusted_audio = (
-                librosa
-                .effects
-                .time_stretch(
-                    full_audio,
-                    rate=args.speed,
-                )
-            )
+        sf.write(
+            adjusted_path,
+            adjusted_audio,
+            44100,
+            subtype="PCM_16",
+        )
 
-            speed_name = (
-                str(args.speed)
-                .replace(
-                    ".",
-                    "_",
-                )
-            )
+        print(
+            f"Adjusted WAV      : "
+            f"{adjusted_path}"
+        )
 
-            adjusted_path = (
-                output_path.with_name(
-                    output_path.stem
-                    + "_speed_"
-                    + speed_name
-                    + output_path.suffix
-                )
-            )
-
-            sf.write(
-                str(
-                    adjusted_path
-                ),
-                adjusted_audio,
-                44100,
-                subtype="PCM_16",
-            )
-
-        except Exception as exc:
-
-            print(
-                f"Adjusted WAV save failed: "
-                f"{exc}"
-            )
-
-    # =========================================================================
+    # =============================================================================
     # METRICS
-    # =========================================================================
+    # =============================================================================
 
     ttfb_ms = (
         headers_received
         - request_start
     ) * 1000
 
-    if first_audio_time is not None:
-
-        ttfa_ms = (
+    ttfa_ms = (
+        (
             first_audio_time
             - request_start
         ) * 1000
 
-    else:
+        if first_audio_time
+        else 0.0
+    )
 
-        ttfa_ms = 0.0
-
-    receive_total_ms = (
+    total_ms = (
         receive_complete_time
-        - request_start
-    ) * 1000
-
-    playback_total_ms = (
-        playback_complete_time
         - request_start
     ) * 1000
 
@@ -776,119 +762,50 @@ def main():
     print("=" * 80)
 
     print(
-        f"HTTP headers / TTFB : "
+        f"HTTP TTFB         : "
         f"{ttfb_ms:.2f} ms"
     )
 
     print(
-        f"TTFA / TTFT         : "
+        f"TTFA              : "
         f"{ttfa_ms:.2f} ms"
     )
 
     print(
-        f"Receive total       : "
-        f"{receive_total_ms:.2f} ms"
+        f"Receive total     : "
+        f"{total_ms:.2f} ms"
     )
 
-    if args.play:
-
-        print(
-            f"E2E incl playback   : "
-            f"{playback_total_ms:.2f} ms"
-        )
-
     print(
-        f"Blocks received     : "
+        f"Blocks            : "
         f"{block_counter}"
     )
 
     print("")
     print("=" * 80)
-    print("SERVER METRICS")
+    print("SERVER")
     print("=" * 80)
 
     print(
-        f"Blocks              : "
-        f"{server_metrics.get('block_count', 0)}"
-    )
-
-    print(
-        f"Preprocess          : "
-        f"{server_metrics.get('preprocess_ms', 0):.2f} ms"
-    )
-
-    print(
-        f"Inference           : "
-        f"{server_metrics.get('inference_ms', 0):.2f} ms"
-    )
-
-    print(
-        f"Decode              : "
-        f"{server_metrics.get('decode_ms', 0):.2f} ms"
-    )
-
-    print(
-        f"SERVER TOTAL        : "
+        f"Server total      : "
         f"{server_metrics.get('server_total_ms', 0):.2f} ms"
     )
 
     print(
-        f"Audio duration      : "
+        f"Audio duration    : "
         f"{server_metrics.get('audio_duration_s', 0):.2f}s"
     )
 
     print(
-        f"Generation RTF      : "
+        f"Generation RTF    : "
         f"{server_metrics.get('generation_rtf', 0):.4f}"
     )
 
-    print(
-        f"Total RTF           : "
-        f"{server_metrics.get('total_rtf', 0):.4f}"
-    )
-
-    print(
-        f"GPU allocated       : "
-        f"{server_metrics.get('gpu_allocated_mb', 0):.2f} MB"
-    )
-
-    print(
-        f"GPU reserved        : "
-        f"{server_metrics.get('gpu_reserved_mb', 0):.2f} MB"
-    )
-
-    print(
-        f"GPU peak            : "
-        f"{server_metrics.get('gpu_peak_mb', 0):.2f} MB"
-    )
-
     print("")
-    print("=" * 80)
-    print("OUTPUT")
-    print("=" * 80)
-
     print(
-        f"Original WAV        : "
+        f"Saved             : "
         f"{output_path}"
     )
-
-    if adjusted_path:
-
-        print(
-            f"Adjusted WAV        : "
-            f"{adjusted_path}"
-        )
-
-    print(
-        f"Reference WAV       : "
-        f"{reference_audio_path}"
-    )
-
-    print(
-        f"Reference voices    : enabled"
-    )
-
-    print("=" * 80)
 
 
 if __name__ == "__main__":
