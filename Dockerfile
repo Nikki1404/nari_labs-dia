@@ -12,6 +12,9 @@ ENV CXX=/usr/bin/g++
 
 ENV MODEL_ID="nari-labs/Dia-1.6B-0626"
 
+ENV HF_HOME=/app/hf_cache
+ENV TRANSFORMERS_CACHE=/app/hf_cache
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 \
@@ -34,20 +37,14 @@ RUN python3 -m pip install \
     torch==2.6.0 \
     --index-url https://download.pytorch.org/whl/cu124
 
-
 WORKDIR /app
 
-
-COPY requirements.txt \
-    /app/requirements.txt
-
+COPY requirements.txt /app/requirements.txt
 
 RUN python3 -m pip install \
     -r /app/requirements.txt
 
-
-COPY server.py \
-    /app/server.py
+COPY server.py /app/server.py
 
 RUN python3 -c "\
 import torch; \
