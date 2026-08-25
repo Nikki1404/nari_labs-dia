@@ -20,14 +20,9 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
-
 from fastapi.responses import StreamingResponse
 from scipy.signal import resample_poly
-
-from transformers import (
-    AutoProcessor,
-    DiaForConditionalGeneration,
-)
+from transformers import AutoProcessor, DiaForConditionalGeneration
 
 
 # =============================================================================
@@ -39,11 +34,7 @@ MODEL_ID = os.getenv(
     "nari-labs/Dia-1.6B-0626",
 )
 
-DEVICE = (
-    "cuda"
-    if torch.cuda.is_available()
-    else "cpu"
-)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 DTYPE = (
     torch.float16
@@ -55,11 +46,9 @@ SAMPLE_RATE = 44100
 
 
 # =============================================================================
-# IMPORTANT:
+# LONG TEXT CONFIG
 #
-# Smaller blocks = better transcript coverage.
-#
-# Do NOT use 50-60 word blocks for strict call-center scripts.
+# Smaller blocks improve transcript coverage.
 # =============================================================================
 
 TARGET_WORDS_PER_BLOCK = 18
@@ -69,18 +58,15 @@ DEFAULT_MAX_NEW_TOKENS = 3072
 
 
 # =============================================================================
-# GENERATION SETTINGS
+# GENERATION CONFIG
 #
-# Lower temperature = less creativity / less wandering.
+# Keep close to Dia's documented generation settings.
 # =============================================================================
 
 GUIDANCE_SCALE = 3.0
-
-TEMPERATURE = 0.8
-
-TOP_P = 0.95
-
-TOP_K = 50
+TEMPERATURE = 1.8
+TOP_P = 0.90
+TOP_K = 45
 
 
 # =============================================================================
@@ -89,7 +75,7 @@ TOP_K = 50
 
 app = FastAPI(
     title="Dia Reference Conditioned TTS",
-    version="6.0.0",
+    version="6.1.0",
 )
 
 processor = None
@@ -102,16 +88,15 @@ model_load_ms = None
 # =============================================================================
 
 def sync_cuda():
-
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 
 
 # =============================================================================
-# TEXT
+# TEXT NORMALIZATION
 # =============================================================================
 
-def normalize_tags(text: str):
+def normalize_tags(text: str) -> str:
 
     text = re.sub(
         r"\[\s*s1\s*\]",
@@ -127,7 +112,6 @@ def normalize_tags(text: str):
         flags=re.IGNORECASE,
     )
 
-    # Preserve punctuation, only normalize whitespace.
     text = re.sub(
         r"\s+",
         " ",
@@ -136,6 +120,10 @@ def normalize_tags(text: str):
 
     return text.strip()
 
+
+# =============================================================================
+# PARSE S1/S2 TURNS
+# =============================================================================
 
 def parse_turns(text: str):
 
@@ -150,10 +138,8 @@ def parse_turns(text: str):
     )
 
     if not matches:
-
         raise ValueError(
-            "Transcript must contain "
-            "[S1] and/or [S2] speaker tags."
+            "Transcript must contain [S1] and/or [S2] tags."
         )
 
     turns = []
@@ -165,37 +151,28 @@ def parse_turns(text: str):
         start = match.end()
 
         if index + 1 < len(matches):
-
-            end = matches[
-                index + 1
-            ].start()
-
+            end = matches[index + 1].start()
         else:
-
             end = len(text)
 
-        speech = (
-            text[start:end]
-            .strip()
-        )
+        speech = text[start:end].strip()
 
         if speech:
-
             turns.append(
-                (
-                    speaker,
-                    speech,
-                )
+                (speaker, speech)
             )
 
     if not turns:
-
         raise ValueError(
             "No dialogue found after speaker tags."
         )
 
     return turns
 
+
+# =============================================================================
+# SENTENCE SPLITTING
+# =============================================================================
 
 def split_sentences(text: str):
 
@@ -212,10 +189,7 @@ def split_sentences(text: str):
 
 
 # =============================================================================
-# Split a single long speaker turn.
-#
-# Important:
-# We preserve sentence boundaries wherever possible.
+# SPLIT LONG SINGLE SPEAKER TURN
 # =============================================================================
 
 def split_long_turn(
@@ -223,16 +197,9 @@ def split_long_turn(
     speech: str,
 ):
 
-    if (
-        len(speech.split())
-        <= MAX_WORDS_PER_BLOCK
-    ):
-
+    if len(speech.split()) <= MAX_WORDS_PER_BLOCK:
         return [
-            (
-                speaker,
-                speech,
-            )
+            (speaker, speech)
         ]
 
     sentences = split_sentences(
@@ -241,108 +208,90 @@ def split_long_turn(
 
     pieces = []
 
-    current_sentences = []
-
+    current = []
     current_words = 0
 
     for sentence in sentences:
 
-        sentence_count = len(
+        sentence_words = len(
             sentence.split()
         )
 
-        # -------------------------------------------------------------
-        # Single sentence itself > maximum.
-        #
-        # Last-resort word split.
-        # -------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # One individual sentence is itself longer than our maximum.
+        # ---------------------------------------------------------------------
 
-        if (
-            sentence_count
-            > MAX_WORDS_PER_BLOCK
-        ):
+        if sentence_words > MAX_WORDS_PER_BLOCK:
 
-            if current_sentences:
+            if current:
 
                 pieces.append(
                     (
                         speaker,
-                        " ".join(
-                            current_sentences
-                        ),
+                        " ".join(current),
                     )
                 )
 
-                current_sentences = []
-
+                current = []
                 current_words = 0
 
             words = sentence.split()
 
-            for index in range(
+            for i in range(
                 0,
                 len(words),
                 MAX_WORDS_PER_BLOCK,
             ):
 
-                part = " ".join(
-                    words[
-                        index:
-                        index
-                        + MAX_WORDS_PER_BLOCK
-                    ]
-                )
-
                 pieces.append(
                     (
                         speaker,
-                        part,
+                        " ".join(
+                            words[
+                                i:
+                                i + MAX_WORDS_PER_BLOCK
+                            ]
+                        ),
                     )
                 )
 
             continue
 
-        # -------------------------------------------------------------
-        # Current group would exceed max.
-        # -------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # Sentence would make current piece too large.
+        # ---------------------------------------------------------------------
 
         if (
-            current_sentences
+            current
             and
-            current_words
-            + sentence_count
+            current_words + sentence_words
             > MAX_WORDS_PER_BLOCK
         ):
 
             pieces.append(
                 (
                     speaker,
-                    " ".join(
-                        current_sentences
-                    ),
+                    " ".join(current),
                 )
             )
 
-            current_sentences = []
-
+            current = []
             current_words = 0
 
-        current_sentences.append(
+        current.append(
             sentence
         )
 
         current_words += (
-            sentence_count
+            sentence_words
         )
 
-    if current_sentences:
+    if current:
 
         pieces.append(
             (
                 speaker,
-                " ".join(
-                    current_sentences
-                ),
+                " ".join(current),
             )
         )
 
@@ -350,17 +299,13 @@ def split_long_turn(
 
 
 # =============================================================================
-# STRICT DIALOGUE BLOCKING
-#
-# Major fix:
-#
-# MAX_WORDS_PER_BLOCK is now enforced regardless of S1/S2.
+# BUILD SMALL DIALOGUE BLOCKS
 # =============================================================================
 
 def build_dialogue_blocks(text: str):
 
-    original_turns = (
-        parse_turns(text)
+    original_turns = parse_turns(
+        text
     )
 
     expanded_turns = []
@@ -377,7 +322,6 @@ def build_dialogue_blocks(text: str):
     blocks = []
 
     current = []
-
     current_words = 0
 
     for speaker, speech in expanded_turns:
@@ -386,17 +330,14 @@ def build_dialogue_blocks(text: str):
             speech.split()
         )
 
-        # -------------------------------------------------------------
-        # HARD MAXIMUM
-        #
-        # Does NOT depend on speaker.
-        # -------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # HARD maximum, independent of S1/S2.
+        # ---------------------------------------------------------------------
 
         if (
             current
             and
-            current_words
-            + word_count
+            current_words + word_count
             > MAX_WORDS_PER_BLOCK
         ):
 
@@ -405,7 +346,6 @@ def build_dialogue_blocks(text: str):
             )
 
             current = []
-
             current_words = 0
 
         current.append(
@@ -419,24 +359,17 @@ def build_dialogue_blocks(text: str):
             word_count
         )
 
-        # -------------------------------------------------------------
-        # Preferred target close.
-        #
-        # Once block reaches target size,
-        # finish it at the completed turn.
-        # -------------------------------------------------------------
+        # ---------------------------------------------------------------------
+        # Target size reached.
+        # ---------------------------------------------------------------------
 
-        if (
-            current_words
-            >= TARGET_WORDS_PER_BLOCK
-        ):
+        if current_words >= TARGET_WORDS_PER_BLOCK:
 
             blocks.append(
                 current
             )
 
             current = []
-
             current_words = 0
 
     if current:
@@ -445,21 +378,19 @@ def build_dialogue_blocks(text: str):
             current
         )
 
-    formatted_blocks = []
+    formatted = []
 
     for block in blocks:
 
-        block_text = " ".join(
-            f"[{speaker}] {speech}"
-            for speaker, speech
-            in block
+        formatted.append(
+            " ".join(
+                f"[{speaker}] {speech}"
+                for speaker, speech
+                in block
+            )
         )
 
-        formatted_blocks.append(
-            block_text
-        )
-
-    return formatted_blocks
+    return formatted
 
 
 # =============================================================================
@@ -471,9 +402,7 @@ def load_reference_audio(
 ):
 
     audio, sample_rate = sf.read(
-        io.BytesIO(
-            wav_bytes
-        ),
+        io.BytesIO(wav_bytes),
         dtype="float32",
     )
 
@@ -490,15 +419,11 @@ def load_reference_audio(
     )
 
     if len(audio) == 0:
-
         raise ValueError(
             "Reference audio is empty."
         )
 
-    if (
-        sample_rate
-        != SAMPLE_RATE
-    ):
+    if sample_rate != SAMPLE_RATE:
 
         divisor = gcd(
             sample_rate,
@@ -528,7 +453,7 @@ def load_reference_audio(
 
 
 # =============================================================================
-# DECODE
+# DECODE GENERATED AUDIO
 # =============================================================================
 
 def decode_generated_audio(
@@ -536,29 +461,20 @@ def decode_generated_audio(
     prompt_len,
 ):
 
-    decoded = (
-        processor.batch_decode(
-            outputs,
-            audio_prompt_len=
-                prompt_len,
-        )
+    decoded = processor.batch_decode(
+        outputs,
+        audio_prompt_len=prompt_len,
     )
 
-    audio = (
-        decoded[0]
-        if isinstance(
-            decoded,
-            (
-                list,
-                tuple,
-            ),
-        )
-        else decoded
-    )
-
-    if torch.is_tensor(
-        audio
+    if isinstance(
+        decoded,
+        (list, tuple),
     ):
+        audio = decoded[0]
+    else:
+        audio = decoded
+
+    if torch.is_tensor(audio):
 
         audio = (
             audio
@@ -580,33 +496,28 @@ def decode_generated_audio(
     if audio.ndim != 1:
 
         raise RuntimeError(
-            f"Unexpected generated "
-            f"audio shape: "
-            f"{audio.shape}"
+            f"Unexpected generated audio shape: {audio.shape}"
         )
 
     if len(audio) == 0:
 
         raise RuntimeError(
-            "Generated audio is empty."
+            "Dia returned empty audio."
         )
 
     if not np.all(
-        np.isfinite(
-            audio
-        )
+        np.isfinite(audio)
     ):
 
         raise RuntimeError(
-            "Generated audio "
-            "contains NaN/Inf."
+            "Generated audio contains NaN or Inf."
         )
 
     return audio
 
 
 # =============================================================================
-# STREAM FRAME
+# CUSTOM STREAM FRAME
 # =============================================================================
 
 def make_frame(
@@ -614,29 +525,23 @@ def make_frame(
     pcm_bytes: bytes = b"",
 ):
 
-    metadata_bytes = (
-        json.dumps(
-            metadata
-        ).encode(
-            "utf-8"
-        )
+    metadata_bytes = json.dumps(
+        metadata
+    ).encode(
+        "utf-8"
     )
 
     return (
         struct.pack(
             ">I",
-            len(
-                metadata_bytes
-            ),
+            len(metadata_bytes),
         )
         +
         metadata_bytes
         +
         struct.pack(
             ">Q",
-            len(
-                pcm_bytes
-            ),
+            len(pcm_bytes),
         )
         +
         pcm_bytes
@@ -659,30 +564,11 @@ def load_model():
     print("DIA TTS STARTUP")
     print("=" * 80)
 
-    print(
-        f"Model             : "
-        f"{MODEL_ID}"
-    )
-
-    print(
-        f"Device            : "
-        f"{DEVICE}"
-    )
-
-    print(
-        f"PyTorch           : "
-        f"{torch.__version__}"
-    )
-
-    print(
-        f"PyTorch CUDA      : "
-        f"{torch.version.cuda}"
-    )
-
-    print(
-        f"CUDA available    : "
-        f"{torch.cuda.is_available()}"
-    )
+    print(f"Model             : {MODEL_ID}")
+    print(f"Device            : {DEVICE}")
+    print(f"PyTorch           : {torch.__version__}")
+    print(f"PyTorch CUDA      : {torch.version.cuda}")
+    print(f"CUDA available    : {torch.cuda.is_available()}")
 
     if torch.cuda.is_available():
 
@@ -691,25 +577,12 @@ def load_model():
             f"{torch.cuda.get_device_name(0)}"
         )
 
-    print(
-        f"DTYPE             : "
-        f"{DTYPE}"
-    )
+        print(
+            f"GPU memory        : "
+            f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB"
+        )
 
-    print(
-        f"Target words      : "
-        f"{TARGET_WORDS_PER_BLOCK}"
-    )
-
-    print(
-        f"Max words         : "
-        f"{MAX_WORDS_PER_BLOCK}"
-    )
-
-    print(
-        f"Temperature       : "
-        f"{TEMPERATURE}"
-    )
+    print(f"DTYPE             : {DTYPE}")
 
     print("=" * 80)
 
@@ -717,25 +590,54 @@ def load_model():
         time.perf_counter_ns()
     )
 
-    processor = (
-        AutoProcessor
-        .from_pretrained(
-            MODEL_ID
-        )
+    # =========================================================================
+    # Processor
+    # =========================================================================
+
+    print(
+        "[startup] Loading processor..."
+    )
+
+    processor = AutoProcessor.from_pretrained(
+        MODEL_ID
+    )
+
+    print(
+        "[startup] Processor loaded."
+    )
+
+    # =========================================================================
+    # IMPORTANT FIX
+    #
+    # Do NOT pass torch_dtype= or dtype= to from_pretrained().
+    #
+    # Load normally, then move/cast.
+    # This matches Dia's documented loading pattern more closely and avoids
+    # dependency-version argument incompatibilities.
+    # =========================================================================
+
+    print(
+        "[startup] Loading Dia model..."
     )
 
     model = (
         DiaForConditionalGeneration
         .from_pretrained(
-            MODEL_ID,
-            torch_dtype=
-                DTYPE,
-            low_cpu_mem_usage=
-                True,
+            MODEL_ID
         )
-        .to(
-            DEVICE
-        )
+    )
+
+    print(
+        "[startup] Model weights loaded."
+    )
+
+    # =========================================================================
+    # Move and cast after loading.
+    # =========================================================================
+
+    model = model.to(
+        device=DEVICE,
+        dtype=DTYPE,
     )
 
     model.eval()
@@ -747,10 +649,32 @@ def load_model():
         - started
     ) / 1_000_000
 
+    print("")
+    print("=" * 80)
+    print("MODEL READY")
+    print("=" * 80)
+
     print(
-        f"Model loaded      : "
+        f"Model load time   : "
         f"{model_load_ms:.2f} ms"
     )
+
+    print(
+        f"Model load time   : "
+        f"{model_load_ms / 1000:.2f} sec"
+    )
+
+    if torch.cuda.is_available():
+
+        print(
+            f"GPU allocated     : "
+            f"{torch.cuda.memory_allocated() / 1024**2:.2f} MB"
+        )
+
+        print(
+            f"GPU reserved      : "
+            f"{torch.cuda.memory_reserved() / 1024**2:.2f} MB"
+        )
 
     print("=" * 80)
 
@@ -762,7 +686,7 @@ def load_model():
 @app.get("/health")
 def health():
 
-    return {
+    result = {
         "status":
             "ok",
 
@@ -772,8 +696,20 @@ def health():
         "device":
             DEVICE,
 
+        "dtype":
+            str(DTYPE),
+
         "cuda_available":
             torch.cuda.is_available(),
+
+        "torch":
+            torch.__version__,
+
+        "torch_cuda":
+            torch.version.cuda,
+
+        "model_load_ms":
+            model_load_ms,
 
         "target_words":
             TARGET_WORDS_PER_BLOCK,
@@ -781,16 +717,21 @@ def health():
         "max_words":
             MAX_WORDS_PER_BLOCK,
 
-        "temperature":
-            TEMPERATURE,
-
-        "default_max_new_tokens":
+        "max_new_tokens":
             DEFAULT_MAX_NEW_TOKENS,
     }
 
+    if torch.cuda.is_available():
+
+        result["gpu"] = (
+            torch.cuda.get_device_name(0)
+        )
+
+    return result
+
 
 # =============================================================================
-# GENERATOR
+# GENERATE BLOCKS
 # =============================================================================
 
 def generate_blocks(
@@ -805,39 +746,29 @@ def generate_blocks(
         time.perf_counter_ns()
     )
 
-    full_text = (
-        normalize_tags(
-            full_text
-        )
+    full_text = normalize_tags(
+        full_text
     )
 
-    reference_text = (
-        normalize_tags(
-            reference_text
-        )
+    reference_text = normalize_tags(
+        reference_text
     )
 
-    blocks = (
-        build_dialogue_blocks(
-            full_text
-        )
+    blocks = build_dialogue_blocks(
+        full_text
     )
 
     print("")
     print("=" * 80)
-    print(
-        "REFERENCE-CONDITIONED REQUEST"
-    )
+    print("REFERENCE-CONDITIONED REQUEST")
     print("=" * 80)
 
     print(
-        f"Request ID        : "
-        f"{request_id}"
+        f"Request ID        : {request_id}"
     )
 
     print(
-        f"Blocks            : "
-        f"{len(blocks)}"
+        f"Blocks            : {len(blocks)}"
     )
 
     print(
@@ -853,15 +784,12 @@ def generate_blocks(
     print("=" * 80)
 
     total_preprocess_ms = 0.0
-
     total_inference_ms = 0.0
-
     total_decode_ms = 0.0
 
     total_samples = 0
 
     if torch.cuda.is_available():
-
         torch.cuda.reset_peak_memory_stats()
 
     for block_index, block_text in enumerate(
@@ -878,12 +806,11 @@ def generate_blocks(
 
         print(
             f"Block "
-            f"{block_index}/"
-            f"{len(blocks)}"
+            f"{block_index}/{len(blocks)}"
         )
 
         print(
-            f"Block words       : "
+            f"Words              : "
             f"{block_words}"
         )
 
@@ -891,12 +818,9 @@ def generate_blocks(
             block_text
         )
 
-        print("-" * 80)
-
-        # =============================================================
-        # Reference transcript +
-        # exact new text.
-        # =============================================================
+        # =========================================================================
+        # Reference transcript must be before generation text.
+        # =========================================================================
 
         conditioned_text = (
             reference_text
@@ -904,9 +828,9 @@ def generate_blocks(
             + block_text
         )
 
-        # =============================================================
+        # =========================================================================
         # PREPROCESS
-        # =============================================================
+        # =========================================================================
 
         preprocess_start = (
             time.perf_counter_ns()
@@ -919,11 +843,8 @@ def generate_blocks(
             audio=
                 reference_audio,
             padding=True,
-            return_tensors=
-                "pt",
-        )
-
-        inputs = inputs.to(
+            return_tensors="pt",
+        ).to(
             model.device
         )
 
@@ -947,9 +868,9 @@ def generate_blocks(
             preprocess_ms
         )
 
-        # =============================================================
+        # =========================================================================
         # INFERENCE
-        # =============================================================
+        # =========================================================================
 
         inference_start = (
             time.perf_counter_ns()
@@ -987,19 +908,17 @@ def generate_blocks(
             inference_ms
         )
 
-        # =============================================================
-        # DECODE
-        # =============================================================
+        # =========================================================================
+        # DECODE ONLY NEW AUDIO
+        # =========================================================================
 
         decode_start = (
             time.perf_counter_ns()
         )
 
-        audio = (
-            decode_generated_audio(
-                outputs,
-                prompt_len,
-            )
+        audio = decode_generated_audio(
+            outputs,
+            prompt_len,
         )
 
         decode_ms = (
@@ -1011,8 +930,8 @@ def generate_blocks(
             decode_ms
         )
 
-        total_samples += len(
-            audio
+        total_samples += (
+            len(audio)
         )
 
         duration = (
@@ -1020,9 +939,9 @@ def generate_blocks(
             / SAMPLE_RATE
         )
 
-        # =============================================================
+        # =========================================================================
         # PCM16
-        # =============================================================
+        # =========================================================================
 
         pcm = np.clip(
             audio,
@@ -1031,8 +950,7 @@ def generate_blocks(
         )
 
         pcm = (
-            pcm
-            * 32767.0
+            pcm * 32767.0
         ).astype(
             "<i2"
         )
@@ -1042,18 +960,18 @@ def generate_blocks(
         )
 
         print(
-            f"Inference         : "
+            f"Inference          : "
             f"{inference_ms:.2f} ms"
         )
 
         print(
-            f"Audio duration    : "
+            f"Audio duration     : "
             f"{duration:.2f}s"
         )
 
-        # =============================================================
-        # SEND
-        # =============================================================
+        # =========================================================================
+        # SEND BLOCK
+        # =========================================================================
 
         yield make_frame(
             {
@@ -1098,7 +1016,7 @@ def generate_blocks(
         )
 
     # =============================================================================
-    # FINAL METRICS
+    # TOTAL METRICS
     # =============================================================================
 
     server_total_ms = (
@@ -1169,8 +1087,7 @@ def generate_blocks(
 
             "gpu_peak_mb":
                 (
-                    torch.cuda
-                    .max_memory_allocated()
+                    torch.cuda.max_memory_allocated()
                     / 1024**2
                     if torch.cuda.is_available()
                     else 0.0
@@ -1180,7 +1097,7 @@ def generate_blocks(
 
 
 # =============================================================================
-# API
+# TTS ENDPOINT
 # =============================================================================
 
 @app.post("/tts")
@@ -1203,9 +1120,7 @@ def tts(
 
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Model is not loaded yet."
-            ),
+            detail="Model is not loaded yet.",
         )
 
     if not (
@@ -1217,8 +1132,8 @@ def tts(
         raise HTTPException(
             status_code=400,
             detail=(
-                "max_new_tokens must "
-                "be between 256 and 4096."
+                "max_new_tokens must be "
+                "between 256 and 4096."
             ),
         )
 
@@ -1229,16 +1144,13 @@ def tts(
     try:
 
         reference_bytes = (
-            reference_audio
-            .file
-            .read()
+            reference_audio.file.read()
         )
 
         if not reference_bytes:
 
             raise ValueError(
-                "Uploaded reference "
-                "audio is empty."
+                "Reference audio is empty."
             )
 
         (
@@ -1250,12 +1162,12 @@ def tts(
 
         print("")
         print(
-            f"[reference] "
+            f"[reference] file     : "
             f"{reference_audio.filename}"
         )
 
         print(
-            f"[reference] duration: "
+            f"[reference] duration : "
             f"{reference_duration:.2f}s"
         )
 
@@ -1287,16 +1199,13 @@ def tts(
                     request_id,
 
                 "X-Sample-Rate":
-                    str(
-                        SAMPLE_RATE
-                    ),
+                    str(SAMPLE_RATE),
             },
         )
 
     except Exception as exc:
 
         if torch.cuda.is_available():
-
             torch.cuda.empty_cache()
 
         print(
