@@ -1,8 +1,9 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-python-multipart>=0.0.9
-transformers>=4.56,<5
-accelerate>=1.0
-numpy>=1.26
-scipy>=1.11
-soundfile>=0.12
+fastapi
+uvicorn[standard]
+python-multipart
+transformers
+accelerate
+numpy
+soundfile
+scipy
+pydantic
