@@ -1948,3 +1948,15 @@ python client.py --server http://localhost:8000 --text-file full_call.txt --refe
 $seeds=@(); while($seeds.Count -lt 100){$seeds+=Get-Random -Minimum 100 -Maximum 50001;$seeds=@($seeds|Sort-Object -Unique)}; foreach($seed in $seeds){Write-Host "Testing seed: $seed"; python client.py --server http://localhost:8000 --seed $seed --text "[S1] Hello. Thank you for calling Inspira Financial. How can I help you today? [S2] Hello. I need assistance with my account. Could you please help me with that?" --max-new-tokens 1024 --output "seed_$seed.wav"}
 
 python client.py --server http://localhost:8000 --text-file full_call.txt --reference-audio reference.wav --reference-text reference.txt --max-new-tokens 4096 --output full_call.wav --play
+================================================================================
+DIA SEED TEST MODE
+================================================================================
+Server            : http://localhost:8000/tts
+Seed              : 3096
+Words             : 29
+Max new tokens    : 1024
+Output            : C:\Users\re_nikitav\Documents\nari_labs-dia\shortlisted\random_wavs\seed_3096.wav
+Play              : False
+================================================================================
+Request failed (422): {"detail":[{"type":"missing","loc":["body","text"],"msg":"Field required","input":null},{"type":"missing","loc":["body","reference_text"],"msg":"Field required","input":null},{"type":"missing","loc":["body","reference_audio"],"msg":"Field required","input":null}]}
+Testing seed: 3714
