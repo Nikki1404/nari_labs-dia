@@ -1,5 +1,9 @@
+#!/usr/bin/env python3
+
 import io
 import json
+import os
+import random
 import re
 import struct
 import time
@@ -17,25 +21,22 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, Field
 from scipy.signal import resample_poly
-from transformers import (
-    AutoProcessor,
-    DiaForConditionalGeneration,
-)
+from transformers import AutoProcessor, DiaForConditionalGeneration
 
 
 # =============================================================================
 # CONFIG
 # =============================================================================
 
-MODEL_ID = "nari-labs/Dia-1.6B-0626"
-
-DEVICE = (
-    "cuda"
-    if torch.cuda.is_available()
-    else "cpu"
+MODEL_ID = os.getenv(
+    "MODEL_ID",
+    "nari-labs/Dia-1.6B-0626",
 )
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 DTYPE = (
     torch.float16
@@ -47,20 +48,14 @@ SAMPLE_RATE = 44100
 
 
 # =============================================================================
-# LONG-TEXT CONFIG
+# LONG-TEXT SETTINGS
 # =============================================================================
 
-# Target moderate dialogue blocks.
-#
-# We do NOT split every sentence.
-# We preserve multiple S1/S2 turns together.
 TARGET_WORDS_PER_BLOCK = 35
-
-# Harder upper target.
 MAX_WORDS_PER_BLOCK = 55
 
-# Per block, NOT entire transcript.
-DEFAULT_MAX_NEW_TOKENS = 3072
+DEFAULT_REFERENCE_MAX_NEW_TOKENS = 4096
+DEFAULT_SEED_MAX_NEW_TOKENS = 1024
 
 
 # =============================================================================
@@ -68,8 +63,8 @@ DEFAULT_MAX_NEW_TOKENS = 3072
 # =============================================================================
 
 app = FastAPI(
-    title="Dia Reference Conditioned TTS",
-    version="5.0.0",
+    title="Dia TTS API",
+    version="6.0.0",
 )
 
 processor = None
@@ -78,19 +73,60 @@ model_load_ms = None
 
 
 # =============================================================================
-# CUDA
+# SEED REQUEST
+# =============================================================================
+
+class SeedTTSRequest(BaseModel):
+
+    text: str = Field(
+        ...,
+        min_length=1,
+    )
+
+    seed: int = Field(
+        default=1234,
+        ge=0,
+        le=2147483647,
+    )
+
+    max_new_tokens: int = Field(
+        default=DEFAULT_SEED_MAX_NEW_TOKENS,
+        ge=256,
+        le=4096,
+    )
+
+
+# =============================================================================
+# CUDA / RNG
 # =============================================================================
 
 def sync_cuda():
+
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 
 
+def set_seed(seed: int):
+
+    random.seed(seed)
+
+    np.random.seed(
+        seed % (2**32 - 1)
+    )
+
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+
 # =============================================================================
-# TEXT NORMALIZATION
+# TEXT HELPERS
 # =============================================================================
 
-def normalize_tags(text: str) -> str:
+def normalize_tags(text: str):
 
     text = re.sub(
         r"\[\s*s1\s*\]",
@@ -128,8 +164,9 @@ def parse_turns(text: str):
     )
 
     if not matches:
+
         raise ValueError(
-            "Transcript must contain [S1] and [S2] tags."
+            "Transcript must contain [S1] and/or [S2] tags."
         )
 
     turns = []
@@ -153,6 +190,7 @@ def parse_turns(text: str):
             )
 
     if not turns:
+
         raise ValueError(
             "No dialogue found after speaker tags."
         )
@@ -160,19 +198,15 @@ def parse_turns(text: str):
     return turns
 
 
-# =============================================================================
-# LONG TURN SPLITTING
-# =============================================================================
-
 def split_sentences(text: str):
 
     return [
-        value.strip()
-        for value in re.split(
+        item.strip()
+        for item in re.split(
             r"(?<=[.!?])\s+",
             text,
         )
-        if value.strip()
+        if item.strip()
     ]
 
 
@@ -193,7 +227,7 @@ def split_long_turn(
         speech
     )
 
-    output = []
+    pieces = []
 
     current = []
     current_words = 0
@@ -204,7 +238,6 @@ def split_long_turn(
             sentence.split()
         )
 
-        # One sentence itself is extremely large.
         if (
             sentence_words
             > MAX_WORDS_PER_BLOCK
@@ -212,7 +245,7 @@ def split_long_turn(
 
             if current:
 
-                output.append(
+                pieces.append(
                     (
                         speaker,
                         " ".join(current),
@@ -224,19 +257,19 @@ def split_long_turn(
 
             words = sentence.split()
 
-            for i in range(
+            for index in range(
                 0,
                 len(words),
                 MAX_WORDS_PER_BLOCK,
             ):
 
-                output.append(
+                pieces.append(
                     (
                         speaker,
                         " ".join(
                             words[
-                                i:
-                                i + MAX_WORDS_PER_BLOCK
+                                index:
+                                index + MAX_WORDS_PER_BLOCK
                             ]
                         ),
                     )
@@ -251,7 +284,7 @@ def split_long_turn(
             > MAX_WORDS_PER_BLOCK
         ):
 
-            output.append(
+            pieces.append(
                 (
                     speaker,
                     " ".join(current),
@@ -266,37 +299,27 @@ def split_long_turn(
 
     if current:
 
-        output.append(
+        pieces.append(
             (
                 speaker,
                 " ".join(current),
             )
         )
 
-    return output
+    return pieces
 
-
-# =============================================================================
-# DIALOGUE-AWARE BLOCKING
-# =============================================================================
 
 def build_dialogue_blocks(text: str):
     """
-    Critical goals:
+    Keep multiple S1/S2 turns together.
 
-    1. Keep several S1/S2 turns together.
-    2. Prefer starting a new block with S1.
-    3. Avoid arbitrarily cutting a sentence.
-    4. Avoid one enormous Dia generation.
+    Prefer block boundaries immediately before S1 so a new block
+    naturally begins with S1.
     """
-
-    original_turns = parse_turns(
-        text
-    )
 
     turns = []
 
-    for speaker, speech in original_turns:
+    for speaker, speech in parse_turns(text):
 
         turns.extend(
             split_long_turn(
@@ -316,13 +339,7 @@ def build_dialogue_blocks(text: str):
             speech.split()
         )
 
-        # -------------------------------------------------------------
-        # Best boundary:
-        #
-        # We already have sufficient text and next turn is S1.
-        # This means the next block naturally starts with S1.
-        # -------------------------------------------------------------
-
+        # Preferred boundary.
         if (
             current
             and
@@ -332,19 +349,12 @@ def build_dialogue_blocks(text: str):
             >= TARGET_WORDS_PER_BLOCK
         ):
 
-            blocks.append(
-                current
-            )
+            blocks.append(current)
 
             current = []
             current_words = 0
 
-        # -------------------------------------------------------------
-        # Hard safety check.
-        #
-        # Still prefer breaking before S1.
-        # -------------------------------------------------------------
-
+        # Harder size boundary, still only before S1.
         elif (
             current
             and
@@ -354,38 +364,31 @@ def build_dialogue_blocks(text: str):
             > MAX_WORDS_PER_BLOCK
         ):
 
-            blocks.append(
-                current
-            )
+            blocks.append(current)
 
             current = []
             current_words = 0
 
         current.append(
-            (speaker, speech)
+            (
+                speaker,
+                speech,
+            )
         )
 
         current_words += word_count
 
     if current:
+        blocks.append(current)
 
-        blocks.append(
-            current
+    return [
+        " ".join(
+            f"[{speaker}] {speech}"
+            for speaker, speech
+            in block
         )
-
-    formatted_blocks = []
-
-    for block in blocks:
-
-        formatted_blocks.append(
-            " ".join(
-                f"[{speaker}] {speech}"
-                for speaker, speech
-                in block
-            )
-        )
-
-    return formatted_blocks
+        for block in blocks
+    ]
 
 
 # =============================================================================
@@ -401,7 +404,6 @@ def load_reference_audio(
         dtype="float32",
     )
 
-    # Stereo -> mono.
     if audio.ndim == 2:
 
         audio = np.mean(
@@ -420,7 +422,6 @@ def load_reference_audio(
             "Reference audio is empty."
         )
 
-    # Dia uses 44.1kHz audio.
     if sample_rate != SAMPLE_RATE:
 
         divisor = gcd(
@@ -432,11 +433,8 @@ def load_reference_audio(
             audio,
             SAMPLE_RATE // divisor,
             sample_rate // divisor,
-        )
-
-        audio = np.asarray(
-            audio,
-            dtype=np.float32,
+        ).astype(
+            np.float32
         )
 
     duration = (
@@ -448,29 +446,23 @@ def load_reference_audio(
 
 
 # =============================================================================
-# GENERATED AUDIO DECODING
+# AUDIO DECODING
 # =============================================================================
 
-def decode_generated_audio(
-    outputs,
-    prompt_len,
-):
+def decode_plain_audio(outputs):
 
     decoded = processor.batch_decode(
-        outputs,
-        audio_prompt_len=prompt_len,
+        outputs
     )
 
-    if isinstance(
-        decoded,
-        (list, tuple),
-    ):
-
-        audio = decoded[0]
-
-    else:
-
-        audio = decoded
+    audio = (
+        decoded[0]
+        if isinstance(
+            decoded,
+            (list, tuple),
+        )
+        else decoded
+    )
 
     if torch.is_tensor(audio):
 
@@ -482,24 +474,76 @@ def decode_generated_audio(
             .numpy()
         )
 
-    audio = np.asarray(
-        audio,
-        dtype=np.float32,
+    audio = np.squeeze(
+        np.asarray(
+            audio,
+            dtype=np.float32,
+        )
     )
-
-    audio = np.squeeze(audio)
 
     if audio.ndim != 1:
 
         raise RuntimeError(
-            f"Unexpected decoded audio shape: "
+            f"Unexpected audio shape: "
             f"{audio.shape}"
         )
 
     if len(audio) == 0:
 
         raise RuntimeError(
-            "Dia returned empty generated audio."
+            "Dia returned empty audio."
+        )
+
+    return audio
+
+
+def decode_conditioned_audio(
+    outputs,
+    prompt_len,
+):
+
+    decoded = processor.batch_decode(
+        outputs,
+        audio_prompt_len=prompt_len,
+    )
+
+    audio = (
+        decoded[0]
+        if isinstance(
+            decoded,
+            (list, tuple),
+        )
+        else decoded
+    )
+
+    if torch.is_tensor(audio):
+
+        audio = (
+            audio
+            .detach()
+            .float()
+            .cpu()
+            .numpy()
+        )
+
+    audio = np.squeeze(
+        np.asarray(
+            audio,
+            dtype=np.float32,
+        )
+    )
+
+    if audio.ndim != 1:
+
+        raise RuntimeError(
+            f"Unexpected conditioned "
+            f"audio shape: {audio.shape}"
+        )
+
+    if len(audio) == 0:
+
+        raise RuntimeError(
+            "Dia returned empty conditioned audio."
         )
 
     if not np.all(
@@ -514,21 +558,13 @@ def decode_generated_audio(
 
 
 # =============================================================================
-# CUSTOM STREAM FRAMING
+# CUSTOM STREAM FRAME
 # =============================================================================
 
 def make_frame(
     metadata: dict,
     pcm_bytes: bytes = b"",
 ):
-    """
-    Frame:
-
-    4 bytes : JSON metadata length
-    N bytes : JSON
-    8 bytes : PCM payload length
-    M bytes : PCM16 audio
-    """
 
     metadata_bytes = json.dumps(
         metadata
@@ -655,7 +691,7 @@ def load_model():
 @app.get("/health")
 def health():
 
-    data = {
+    result = {
 
         "status":
             "ok",
@@ -678,32 +714,305 @@ def health():
         "model_load_ms":
             model_load_ms,
 
-        "sample_rate":
-            SAMPLE_RATE,
+        "endpoints": {
+            "/tts_seed":
+                "native seed auditioning",
 
-        "generation_mode":
-            "uploaded-reference-conditioned",
-
-        "speaker_mapping": {
-            "S1": "agent",
-            "S2": "customer",
+            "/tts":
+                "reference-conditioned long TTS",
         },
     }
 
     if torch.cuda.is_available():
 
-        data["gpu"] = (
+        result["gpu"] = (
             torch.cuda.get_device_name(0)
         )
 
-    return data
+    return result
 
 
 # =============================================================================
-# GENERATOR
+# /tts_seed
+#
+# JSON request:
+#
+# {
+#   "text": "...",
+#   "seed": 1234,
+#   "max_new_tokens": 1024
+# }
 # =============================================================================
 
-def generate_blocks(
+@app.post("/tts_seed")
+def tts_seed(
+    req: SeedTTSRequest,
+):
+
+    if (
+        model is None
+        or processor is None
+    ):
+
+        raise HTTPException(
+            status_code=503,
+            detail="Model is not loaded yet.",
+        )
+
+    request_id = str(
+        uuid.uuid4()
+    )
+
+    server_start = (
+        time.perf_counter_ns()
+    )
+
+    try:
+
+        set_seed(
+            req.seed
+        )
+
+        # =====================================================================
+        # PREPROCESS
+        # =====================================================================
+
+        preprocess_start = (
+            time.perf_counter_ns()
+        )
+
+        inputs = processor(
+            text=[
+                normalize_tags(
+                    req.text
+                )
+            ],
+            padding=True,
+            return_tensors="pt",
+        ).to(
+            model.device
+        )
+
+        sync_cuda()
+
+        preprocess_ms = (
+            time.perf_counter_ns()
+            - preprocess_start
+        ) / 1_000_000
+
+        # =====================================================================
+        # INFERENCE
+        # =====================================================================
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+        inference_start = (
+            time.perf_counter_ns()
+        )
+
+        with torch.inference_mode():
+
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=
+                    req.max_new_tokens,
+                guidance_scale=3.0,
+                temperature=1.8,
+                top_p=0.90,
+                top_k=45,
+            )
+
+        sync_cuda()
+
+        inference_ms = (
+            time.perf_counter_ns()
+            - inference_start
+        ) / 1_000_000
+
+        # =====================================================================
+        # DECODE
+        # =====================================================================
+
+        decode_start = (
+            time.perf_counter_ns()
+        )
+
+        audio = decode_plain_audio(
+            outputs
+        )
+
+        decode_ms = (
+            time.perf_counter_ns()
+            - decode_start
+        ) / 1_000_000
+
+        audio_duration_s = (
+            len(audio)
+            / SAMPLE_RATE
+        )
+
+        # =====================================================================
+        # WAV
+        # =====================================================================
+
+        encode_start = (
+            time.perf_counter_ns()
+        )
+
+        buffer = io.BytesIO()
+
+        sf.write(
+            buffer,
+            audio,
+            SAMPLE_RATE,
+            format="WAV",
+            subtype="PCM_16",
+        )
+
+        wav_bytes = (
+            buffer.getvalue()
+        )
+
+        encode_ms = (
+            time.perf_counter_ns()
+            - encode_start
+        ) / 1_000_000
+
+        server_total_ms = (
+            time.perf_counter_ns()
+            - server_start
+        ) / 1_000_000
+
+        generation_rtf = (
+            (
+                inference_ms
+                / 1000.0
+            )
+            / audio_duration_s
+
+            if audio_duration_s > 0
+
+            else 0.0
+        )
+
+        gpu_allocated = 0.0
+        gpu_reserved = 0.0
+        gpu_peak = 0.0
+
+        if torch.cuda.is_available():
+
+            gpu_allocated = (
+                torch.cuda.memory_allocated()
+                / 1024**2
+            )
+
+            gpu_reserved = (
+                torch.cuda.memory_reserved()
+                / 1024**2
+            )
+
+            gpu_peak = (
+                torch.cuda.max_memory_allocated()
+                / 1024**2
+            )
+
+        print("")
+        print("=" * 80)
+        print("SEED TTS")
+        print("=" * 80)
+
+        print(
+            f"Request ID        : "
+            f"{request_id}"
+        )
+
+        print(
+            f"Seed              : "
+            f"{req.seed}"
+        )
+
+        print(
+            f"Inference         : "
+            f"{inference_ms:.2f} ms"
+        )
+
+        print(
+            f"Audio duration    : "
+            f"{audio_duration_s:.2f} sec"
+        )
+
+        print("=" * 80)
+
+        headers = {
+
+            "X-Request-ID":
+                request_id,
+
+            "X-Seed":
+                str(req.seed),
+
+            "X-Preprocess-Time-MS":
+                f"{preprocess_ms:.2f}",
+
+            "X-Inference-Time-MS":
+                f"{inference_ms:.2f}",
+
+            "X-Decode-Time-MS":
+                f"{decode_ms:.2f}",
+
+            "X-Encoding-Time-MS":
+                f"{encode_ms:.2f}",
+
+            "X-Server-Total-MS":
+                f"{server_total_ms:.2f}",
+
+            "X-Audio-Duration-S":
+                f"{audio_duration_s:.3f}",
+
+            "X-Generation-RTF":
+                f"{generation_rtf:.4f}",
+
+            "X-Sample-Rate":
+                str(SAMPLE_RATE),
+
+            "X-GPU-Allocated-MB":
+                f"{gpu_allocated:.2f}",
+
+            "X-GPU-Reserved-MB":
+                f"{gpu_reserved:.2f}",
+
+            "X-GPU-Peak-MB":
+                f"{gpu_peak:.2f}",
+        }
+
+        return Response(
+            content=wav_bytes,
+            media_type="audio/wav",
+            headers=headers,
+        )
+
+    except Exception as exc:
+
+        if torch.cuda.is_available():
+
+            torch.cuda.empty_cache()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Seed TTS failed: "
+                f"{type(exc).__name__}: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+# =============================================================================
+# REFERENCE-CONDITIONED GENERATOR
+# =============================================================================
+
+def generate_reference_blocks(
     full_text: str,
     reference_text: str,
     reference_audio: np.ndarray,
@@ -727,17 +1036,28 @@ def generate_blocks(
         full_text
     )
 
+    total_preprocess_ms = 0.0
+    total_inference_ms = 0.0
+    total_decode_ms = 0.0
+    total_audio_samples = 0
+
+    if torch.cuda.is_available():
+
+        torch.cuda.reset_peak_memory_stats()
+
     print("")
     print("=" * 80)
-    print("REFERENCE-CONDITIONED REQUEST")
+    print("REFERENCE-CONDITIONED TTS")
     print("=" * 80)
 
     print(
-        f"Request ID        : {request_id}"
+        f"Request ID        : "
+        f"{request_id}"
     )
 
     print(
-        f"Blocks            : {len(blocks)}"
+        f"Blocks            : "
+        f"{len(blocks)}"
     )
 
     print(
@@ -745,26 +1065,7 @@ def generate_blocks(
         f"{len(reference_audio) / SAMPLE_RATE:.2f}s"
     )
 
-    print(
-        f"Max new tokens    : "
-        f"{max_new_tokens}"
-    )
-
     print("=" * 80)
-
-    total_preprocess_ms = 0.0
-    total_inference_ms = 0.0
-    total_decode_ms = 0.0
-
-    total_samples = 0
-
-    if torch.cuda.is_available():
-
-        torch.cuda.reset_peak_memory_stats()
-
-    # =========================================================================
-    # GENERATE EACH MODERATE BLOCK
-    # =========================================================================
 
     for block_index, block_text in enumerate(
         blocks,
@@ -776,20 +1077,15 @@ def generate_blocks(
 
         print(
             f"Block "
-            f"{block_index}/{len(blocks)}"
+            f"{block_index}/"
+            f"{len(blocks)}"
         )
 
         print(
             block_text
         )
 
-        # ---------------------------------------------------------------------
-        # Important:
-        #
-        # Reference transcript corresponds to reference_audio.
-        # New dialogue is appended after it.
-        # ---------------------------------------------------------------------
-
+        # Reference transcript must be before the new text.
         conditioned_text = (
             reference_text
             + " "
@@ -811,13 +1107,10 @@ def generate_blocks(
             audio=reference_audio,
             padding=True,
             return_tensors="pt",
-        )
-
-        inputs = inputs.to(
+        ).to(
             model.device
         )
 
-        # Official Dia audio-conditioning mechanism.
         prompt_len = (
             processor
             .get_audio_prompt_len(
@@ -850,7 +1143,8 @@ def generate_blocks(
 
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=max_new_tokens,
+                max_new_tokens=
+                    max_new_tokens,
                 guidance_scale=3.0,
                 temperature=1.8,
                 top_p=0.90,
@@ -876,9 +1170,11 @@ def generate_blocks(
             time.perf_counter_ns()
         )
 
-        audio = decode_generated_audio(
-            outputs,
-            prompt_len,
+        audio = (
+            decode_conditioned_audio(
+                outputs,
+                prompt_len,
+            )
         )
 
         decode_ms = (
@@ -890,15 +1186,17 @@ def generate_blocks(
             decode_ms
         )
 
-        total_samples += len(audio)
+        total_audio_samples += (
+            len(audio)
+        )
 
-        duration = (
+        audio_duration_s = (
             len(audio)
             / SAMPLE_RATE
         )
 
         # =====================================================================
-        # FLOAT32 -> PCM16
+        # PCM16
         # =====================================================================
 
         pcm = np.clip(
@@ -924,13 +1222,10 @@ def generate_blocks(
 
         print(
             f"Audio duration    : "
-            f"{duration:.2f} sec"
+            f"{audio_duration_s:.2f}s"
         )
 
-        # =====================================================================
-        # SEND BLOCK IMMEDIATELY
-        # =====================================================================
-
+        # Send block immediately.
         yield make_frame(
             {
                 "type":
@@ -952,7 +1247,7 @@ def generate_blocks(
                     1,
 
                 "audio_duration_s":
-                    duration,
+                    audio_duration_s,
 
                 "preprocess_ms":
                     preprocess_ms,
@@ -968,7 +1263,7 @@ def generate_blocks(
         )
 
     # =========================================================================
-    # FINAL METRICS
+    # FINAL
     # =========================================================================
 
     server_total_ms = (
@@ -977,7 +1272,7 @@ def generate_blocks(
     ) / 1_000_000
 
     audio_duration_s = (
-        total_samples
+        total_audio_samples
         / SAMPLE_RATE
     )
 
@@ -1026,48 +1321,6 @@ def generate_blocks(
             / 1024**2
         )
 
-    print("")
-    print("=" * 80)
-    print("SERVER TOTAL")
-    print("=" * 80)
-
-    print(
-        f"Blocks            : "
-        f"{len(blocks)}"
-    )
-
-    print(
-        f"Preprocess        : "
-        f"{total_preprocess_ms:.2f} ms"
-    )
-
-    print(
-        f"Inference         : "
-        f"{total_inference_ms:.2f} ms"
-    )
-
-    print(
-        f"Decode            : "
-        f"{total_decode_ms:.2f} ms"
-    )
-
-    print(
-        f"SERVER TOTAL      : "
-        f"{server_total_ms:.2f} ms"
-    )
-
-    print(
-        f"Audio duration    : "
-        f"{audio_duration_s:.2f} sec"
-    )
-
-    print(
-        f"Generation RTF    : "
-        f"{generation_rtf:.4f}"
-    )
-
-    print("=" * 80)
-
     yield make_frame(
         {
             "type":
@@ -1113,16 +1366,26 @@ def generate_blocks(
 
 
 # =============================================================================
-# TTS API
+# /tts
+#
+# multipart/form-data:
+#
+# text
+# reference_text
+# max_new_tokens
+# reference_audio
 # =============================================================================
 
 @app.post("/tts")
-def tts(
+def tts_reference(
     text: str = Form(...),
+
     reference_text: str = Form(...),
+
     max_new_tokens: int = Form(
-        DEFAULT_MAX_NEW_TOKENS
+        DEFAULT_REFERENCE_MAX_NEW_TOKENS
     ),
+
     reference_audio: UploadFile = File(...),
 ):
 
@@ -1136,10 +1399,10 @@ def tts(
             detail="Model is not loaded yet.",
         )
 
-    if (
-        max_new_tokens < 256
-        or
-        max_new_tokens > 4096
+    if not (
+        256
+        <= max_new_tokens
+        <= 4096
     ):
 
         raise HTTPException(
@@ -1156,10 +1419,6 @@ def tts(
 
     try:
 
-        # =====================================================================
-        # LOAD UPLOADED REFERENCE WAV
-        # =====================================================================
-
         reference_bytes = (
             reference_audio.file.read()
         )
@@ -1170,30 +1429,39 @@ def tts(
                 "Uploaded reference audio is empty."
             )
 
-        reference_array, reference_duration = (
-            load_reference_audio(
-                reference_bytes
-            )
+        (
+            reference_array,
+            reference_duration,
+        ) = load_reference_audio(
+            reference_bytes
         )
 
         print("")
         print(
-            f"[request] Reference file: "
+            f"[reference] File     : "
             f"{reference_audio.filename}"
         )
 
         print(
-            f"[request] Reference duration: "
+            f"[reference] Duration : "
             f"{reference_duration:.2f}s"
         )
 
         return StreamingResponse(
-            generate_blocks(
+            generate_reference_blocks(
                 full_text=text,
-                reference_text=reference_text,
-                reference_audio=reference_array,
-                max_new_tokens=max_new_tokens,
-                request_id=request_id,
+
+                reference_text=
+                    reference_text,
+
+                reference_audio=
+                    reference_array,
+
+                max_new_tokens=
+                    max_new_tokens,
+
+                request_id=
+                    request_id,
             ),
 
             media_type=(
@@ -1216,6 +1484,7 @@ def tts(
     except Exception as exc:
 
         if torch.cuda.is_available():
+
             torch.cuda.empty_cache()
 
         print(
@@ -1227,7 +1496,7 @@ def tts(
         raise HTTPException(
             status_code=500,
             detail=(
-                "TTS generation failed: "
+                "Reference TTS failed: "
                 f"{type(exc).__name__}: "
                 f"{exc}"
             ),
