@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import io
 import json
 import queue
 import struct
@@ -15,16 +16,12 @@ import soundfile as sf
 
 
 # =============================================================================
-# FILE HELPERS
+# HELPERS
 # =============================================================================
 
-def read_text_file(
-    path_value,
-):
+def read_text_file(path_value):
 
-    path = Path(
-        path_value
-    )
+    path = Path(path_value)
 
     if not path.exists():
 
@@ -39,9 +36,25 @@ def read_text_file(
     ).strip()
 
 
-# =============================================================================
-# NETWORK STREAM HELPERS
-# =============================================================================
+def safe_float(
+    headers,
+    key,
+    default=0.0,
+):
+
+    try:
+
+        return float(
+            headers.get(
+                key,
+                default,
+            )
+        )
+
+    except Exception:
+
+        return default
+
 
 def receive_exact(
     raw,
@@ -62,18 +75,13 @@ def receive_exact(
                 "Server stream ended unexpectedly."
             )
 
-        data.extend(
-            part
-        )
+        data.extend(part)
 
-    return bytes(
-        data
-    )
+    return bytes(data)
 
 
 def read_frame(raw):
 
-    # JSON metadata size.
     metadata_size = struct.unpack(
         ">I",
         receive_exact(
@@ -82,7 +90,6 @@ def read_frame(raw):
         ),
     )[0]
 
-    # JSON metadata.
     metadata = json.loads(
         receive_exact(
             raw,
@@ -92,7 +99,6 @@ def read_frame(raw):
         )
     )
 
-    # Audio byte count.
     pcm_size = struct.unpack(
         ">Q",
         receive_exact(
@@ -117,91 +123,370 @@ def read_frame(raw):
 
 
 # =============================================================================
-# MAIN
+# SPEED
 # =============================================================================
 
-def main():
+def adjust_speed(
+    audio,
+    speed,
+):
 
-    parser = argparse.ArgumentParser(
-        description=(
-            "Dia long-text TTS client "
-            "with reference audio conditioning"
+    if speed == 1.0:
+
+        return audio
+
+    try:
+
+        import librosa
+
+        return (
+            librosa
+            .effects
+            .time_stretch(
+                audio,
+                rate=speed,
+            )
         )
+
+    except Exception as exc:
+
+        print(
+            f"[WARN] Speed adjustment "
+            f"failed: {exc}"
+        )
+
+        return audio
+
+
+def play_audio_file(
+    path,
+    speed,
+):
+
+    try:
+
+        import sounddevice as sd
+
+        audio, sr = sf.read(
+            str(path),
+            dtype="float32",
+        )
+
+        audio = adjust_speed(
+            audio,
+            speed,
+        )
+
+        print("")
+        print(
+            f"Playing at speed="
+            f"{speed}..."
+        )
+
+        sd.play(
+            audio,
+            sr,
+        )
+
+        sd.wait()
+
+        print(
+            "Playback complete."
+        )
+
+    except Exception as exc:
+
+        print(
+            f"Playback failed: "
+            f"{exc}"
+        )
+
+
+# =============================================================================
+# SEED MODE
+# =============================================================================
+
+def run_seed_mode(args):
+
+    if args.text_file:
+
+        text = read_text_file(
+            args.text_file
+        )
+
+    elif args.text:
+
+        text = args.text.strip()
+
+    else:
+
+        print(
+            "Seed mode requires "
+            "--text or --text-file."
+        )
+
+        sys.exit(1)
+
+    # IMPORTANT:
+    # Seed mode goes to /tts_seed.
+    url = (
+        args.server.rstrip("/")
+        + "/tts_seed"
     )
 
-    parser.add_argument(
-        "--server",
-        default="http://localhost:8000",
+    payload = {
+        "text":
+            text,
+
+        "seed":
+            args.seed,
+
+        "max_new_tokens":
+            args.max_new_tokens,
+    }
+
+    print("")
+    print("=" * 80)
+    print("DIA SEED TEST MODE")
+    print("=" * 80)
+
+    print(
+        f"Server            : "
+        f"{url}"
     )
 
-    parser.add_argument(
-        "--text-file",
-        required=True,
-        help=(
-            "Long [S1]/[S2] transcript."
-        ),
+    print(
+        f"Seed              : "
+        f"{args.seed}"
     )
 
-    parser.add_argument(
-        "--reference-audio",
-        required=True,
-        help=(
-            "Local reference WAV file."
-        ),
+    print(
+        f"Words             : "
+        f"{len(text.split())}"
     )
 
-    parser.add_argument(
-        "--reference-text",
-        required=True,
-        help=(
-            "TXT containing the exact "
-            "transcript of reference WAV."
-        ),
+    print(
+        f"Max new tokens    : "
+        f"{args.max_new_tokens}"
     )
 
-    parser.add_argument(
-        "--output",
-        default="full_call.wav",
+    print(
+        f"Output            : "
+        f"{args.output}"
     )
 
-    parser.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=3072,
+    print(
+        f"Play              : "
+        f"{args.play}"
     )
 
-    parser.add_argument(
-        "--play",
-        action="store_true",
+    print("=" * 80)
+
+    request_start = (
+        time.perf_counter()
     )
 
-    parser.add_argument(
-        "--speed",
-        type=float,
-        default=1.0,
-        help=(
-            "Client playback speed. "
-            "1.0=original, "
-            "0.9=10%% slower."
-        ),
+    try:
+
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=args.timeout,
+        )
+
+    except requests.RequestException as exc:
+
+        print(
+            f"Request failed: "
+            f"{exc}"
+        )
+
+        sys.exit(1)
+
+    headers_received = (
+        time.perf_counter()
     )
 
-    parser.add_argument(
-        "--save-adjusted",
-        action="store_true",
+    if response.status_code != 200:
+
+        print(
+            f"Request failed "
+            f"({response.status_code}): "
+            f"{response.text}"
+        )
+
+        sys.exit(1)
+
+    audio_bytes = (
+        response.content
     )
 
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=1800.0,
+    first_audio_time = (
+        time.perf_counter()
     )
 
-    args = parser.parse_args()
+    if not audio_bytes:
 
-    # =========================================================================
-    # VALIDATION
-    # =========================================================================
+        print(
+            "No audio returned."
+        )
+
+        sys.exit(1)
+
+    output_path = Path(
+        args.output
+    )
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_path.write_bytes(
+        audio_bytes
+    )
+
+    with sf.SoundFile(
+        io.BytesIO(
+            audio_bytes
+        )
+    ) as wav:
+
+        sample_rate = wav.samplerate
+        channels = wav.channels
+        frames = len(wav)
+
+        duration = (
+            frames
+            / sample_rate
+        )
+
+    request_end = (
+        time.perf_counter()
+    )
+
+    ttfb_ms = (
+        headers_received
+        - request_start
+    ) * 1000
+
+    ttfa_ms = (
+        first_audio_time
+        - request_start
+    ) * 1000
+
+    total_ms = (
+        request_end
+        - request_start
+    ) * 1000
+
+    print("")
+    print("=" * 80)
+    print("CLIENT LATENCY")
+    print("=" * 80)
+
+    print(
+        f"TTFB              : "
+        f"{ttfb_ms:.2f} ms"
+    )
+
+    print(
+        f"TTFA / TTFT       : "
+        f"{ttfa_ms:.2f} ms"
+    )
+
+    print(
+        f"CLIENT TOTAL      : "
+        f"{total_ms:.2f} ms"
+    )
+
+    print("")
+    print("=" * 80)
+    print("SERVER LATENCY")
+    print("=" * 80)
+
+    print(
+        f"Preprocess        : "
+        f"{safe_float(response.headers, 'X-Preprocess-Time-MS'):.2f} ms"
+    )
+
+    print(
+        f"Inference         : "
+        f"{safe_float(response.headers, 'X-Inference-Time-MS'):.2f} ms"
+    )
+
+    print(
+        f"Decode            : "
+        f"{safe_float(response.headers, 'X-Decode-Time-MS'):.2f} ms"
+    )
+
+    print(
+        f"SERVER TOTAL      : "
+        f"{safe_float(response.headers, 'X-Server-Total-MS'):.2f} ms"
+    )
+
+    print(
+        f"Audio duration    : "
+        f"{duration:.3f} sec"
+    )
+
+    print("")
+    print("=" * 80)
+    print("OUTPUT")
+    print("=" * 80)
+
+    print(
+        f"Saved             : "
+        f"{output_path}"
+    )
+
+    print(
+        f"Seed              : "
+        f"{args.seed}"
+    )
+
+    print("=" * 80)
+
+    if args.play:
+
+        play_audio_file(
+            output_path,
+            args.speed,
+        )
+
+
+# =============================================================================
+# REFERENCE MODE
+# =============================================================================
+
+def run_reference_mode(args):
+
+    if not args.text_file:
+
+        print(
+            "Reference mode requires "
+            "--text-file."
+        )
+
+        sys.exit(1)
+
+    if not args.reference_audio:
+
+        print(
+            "Reference mode requires "
+            "--reference-audio."
+        )
+
+        sys.exit(1)
+
+    if not args.reference_text:
+
+        print(
+            "Reference mode requires "
+            "--reference-text."
+        )
+
+        sys.exit(1)
 
     transcript_path = Path(
         args.text_file
@@ -224,22 +509,11 @@ def main():
         if not path.exists():
 
             print(
-                f"File not found: {path}"
+                f"File not found: "
+                f"{path}"
             )
 
             sys.exit(1)
-
-    if args.speed <= 0:
-
-        print(
-            "--speed must be > 0"
-        )
-
-        sys.exit(1)
-
-    # =========================================================================
-    # LOAD TEXT
-    # =========================================================================
 
     text = read_text_file(
         transcript_path
@@ -256,11 +530,12 @@ def main():
 
     print("")
     print("=" * 80)
-    print("DIA REFERENCE TTS CLIENT")
+    print("DIA REFERENCE LONG-TTS MODE")
     print("=" * 80)
 
     print(
-        f"Server            : {url}"
+        f"Server            : "
+        f"{url}"
     )
 
     print(
@@ -279,27 +554,22 @@ def main():
     )
 
     print(
-        f"Output            : "
-        f"{args.output}"
-    )
-
-    print(
-        f"Transcript words  : "
-        f"{len(text.split())}"
-    )
-
-    print(
         f"Max new tokens    : "
         f"{args.max_new_tokens}"
     )
 
     print(
-        f"Playback          : "
+        f"Output            : "
+        f"{args.output}"
+    )
+
+    print(
+        f"Play              : "
         f"{args.play}"
     )
 
     print(
-        f"Playback speed    : "
+        f"Speed             : "
         f"{args.speed}"
     )
 
@@ -346,58 +616,31 @@ def main():
                     ) = item
 
                     playback_audio = (
-                        audio
+                        adjust_speed(
+                            audio,
+                            args.speed,
+                        )
                     )
-
-                    # ---------------------------------------------------------
-                    # OPTIONAL CLIENT-SIDE SPEED ADJUSTMENT
-                    # ---------------------------------------------------------
-
-                    if args.speed != 1.0:
-
-                        try:
-
-                            import librosa
-
-                            playback_audio = (
-                                librosa
-                                .effects
-                                .time_stretch(
-                                    audio,
-                                    rate=args.speed,
-                                )
-                            )
-
-                        except Exception as exc:
-
-                            print(
-                                f"[WARN] "
-                                f"Speed adjustment failed: "
-                                f"{exc}"
-                            )
 
                     print("")
                     print(
-                        f"[PLAY] Starting block "
+                        f"[PLAY] Starting "
+                        f"block "
                         f"{block_index}/"
                         f"{block_count}"
                     )
-
-                    # ---------------------------------------------------------
-                    # Strict sequential playback.
-                    #
-                    # No next block begins until this returns.
-                    # ---------------------------------------------------------
 
                     sd.play(
                         playback_audio,
                         sample_rate,
                     )
 
+                    # Strict sequential playback.
                     sd.wait()
 
                     print(
-                        f"[PLAY] Finished block "
+                        f"[PLAY] Finished "
+                        f"block "
                         f"{block_index}/"
                         f"{block_count}"
                     )
@@ -416,68 +659,64 @@ def main():
         except Exception as exc:
 
             print(
-                f"Playback disabled: {exc}"
+                f"Playback disabled: "
+                f"{exc}"
             )
 
             playback_enabled = False
 
     # =========================================================================
-    # MULTIPART REQUEST
+    # MULTIPART HTTP
     # =========================================================================
 
     request_start = (
         time.perf_counter()
     )
 
-    reference_handle = open(
-        reference_audio_path,
-        "rb",
-    )
-
     try:
 
-        files = {
-            "reference_audio": (
-                reference_audio_path.name,
-                reference_handle,
-                "audio/wav",
+        with open(
+            reference_audio_path,
+            "rb",
+        ) as handle:
+
+            files = {
+                "reference_audio": (
+                    reference_audio_path.name,
+                    handle,
+                    "audio/wav",
+                )
+            }
+
+            data = {
+                "text":
+                    text,
+
+                "reference_text":
+                    reference_text,
+
+                "max_new_tokens":
+                    str(
+                        args.max_new_tokens
+                    ),
+            }
+
+            response = requests.post(
+                url,
+                data=data,
+                files=files,
+                stream=True,
+                timeout=args.timeout,
             )
-        }
-
-        data = {
-            "text":
-                text,
-
-            "reference_text":
-                reference_text,
-
-            "max_new_tokens":
-                str(
-                    args.max_new_tokens
-                ),
-        }
-
-        response = requests.post(
-            url,
-            data=data,
-            files=files,
-            stream=True,
-            timeout=args.timeout,
-        )
 
     except requests.RequestException as exc:
 
-        reference_handle.close()
-
         print(
-            f"Request failed: {exc}"
+            f"Request failed: "
+            f"{exc}"
         )
 
         sys.exit(1)
-
-    finally:
-
-        reference_handle.close()
 
     headers_received = (
         time.perf_counter()
@@ -494,7 +733,7 @@ def main():
         sys.exit(1)
 
     # =========================================================================
-    # FINAL WAV WRITER
+    # OUTPUT WRITER
     # =========================================================================
 
     output_path = Path(
@@ -507,9 +746,7 @@ def main():
     )
 
     wav_writer = sf.SoundFile(
-        str(
-            output_path
-        ),
+        str(output_path),
 
         mode="w",
 
@@ -525,15 +762,8 @@ def main():
     complete_audio_parts = []
 
     first_audio_time = None
-    receive_complete_time = None
-
     block_counter = 0
-
     server_metrics = {}
-
-    # =========================================================================
-    # RECEIVE STREAM
-    # =========================================================================
 
     try:
 
@@ -550,10 +780,6 @@ def main():
                     "type"
                 )
             )
-
-            # =================================================================
-            # AUDIO
-            # =================================================================
 
             if frame_type == "audio":
 
@@ -576,10 +802,6 @@ def main():
                     )
                     / 32767.0
                 )
-
-                # -------------------------------------------------------------
-                # Append directly to ONE final WAV.
-                # -------------------------------------------------------------
 
                 wav_writer.write(
                     audio
@@ -606,12 +828,6 @@ def main():
                     f"{metadata['inference_ms']:.2f}ms"
                 )
 
-                # -------------------------------------------------------------
-                # Queue playback.
-                #
-                # Even if later blocks arrive quickly, they wait.
-                # -------------------------------------------------------------
-
                 if playback_enabled:
 
                     playback_queue.put(
@@ -632,10 +848,6 @@ def main():
                         )
                     )
 
-            # =================================================================
-            # END
-            # =================================================================
-
             elif frame_type == "end":
 
                 server_metrics = (
@@ -653,7 +865,7 @@ def main():
     )
 
     # =========================================================================
-    # WAIT FOR ALL PLAYBACK
+    # WAIT FOR PLAYBACK
     # =========================================================================
 
     if playback_enabled:
@@ -669,7 +881,7 @@ def main():
         if playback_thread:
 
             playback_thread.join(
-                timeout=10,
+                timeout=10
             )
 
     playback_complete_time = (
@@ -677,7 +889,7 @@ def main():
     )
 
     # =========================================================================
-    # OPTIONAL FINAL SPEED-ADJUSTED FILE
+    # OPTIONAL ADJUSTED FILE
     # =========================================================================
 
     adjusted_path = None
@@ -690,55 +902,40 @@ def main():
         complete_audio_parts
     ):
 
-        try:
+        full_audio = np.concatenate(
+            complete_audio_parts
+        )
 
-            import librosa
-
-            full_audio = np.concatenate(
-                complete_audio_parts
+        adjusted_audio = (
+            adjust_speed(
+                full_audio,
+                args.speed,
             )
+        )
 
-            adjusted_audio = (
-                librosa
-                .effects
-                .time_stretch(
-                    full_audio,
-                    rate=args.speed,
-                )
+        speed_string = (
+            str(args.speed)
+            .replace(
+                ".",
+                "_",
             )
+        )
 
-            speed_name = (
-                str(args.speed)
-                .replace(
-                    ".",
-                    "_",
-                )
+        adjusted_path = (
+            output_path.with_name(
+                output_path.stem
+                + "_speed_"
+                + speed_string
+                + output_path.suffix
             )
+        )
 
-            adjusted_path = (
-                output_path.with_name(
-                    output_path.stem
-                    + "_speed_"
-                    + speed_name
-                    + output_path.suffix
-                )
-            )
-
-            sf.write(
-                str(
-                    adjusted_path
-                ),
-                adjusted_audio,
-                44100,
-                subtype="PCM_16",
-            )
-
-        except Exception as exc:
-
-            print(
-                f"Adjusted WAV save failed: "
-                f"{exc}"
-            )
+        sf.write(
+            str(adjusted_path),
+            adjusted_audio,
+            44100,
+            subtype="PCM_16",
+        )
 
     # =========================================================================
     # METRICS
@@ -749,16 +946,15 @@ def main():
         - request_start
     ) * 1000
 
-    if first_audio_time is not None:
-
-        ttfa_ms = (
+    ttfa_ms = (
+        (
             first_audio_time
             - request_start
         ) * 1000
 
-    else:
-
-        ttfa_ms = 0.0
+        if first_audio_time
+        else 0.0
+    )
 
     receive_total_ms = (
         receive_complete_time
@@ -843,21 +1039,6 @@ def main():
     )
 
     print(
-        f"Total RTF           : "
-        f"{server_metrics.get('total_rtf', 0):.4f}"
-    )
-
-    print(
-        f"GPU allocated       : "
-        f"{server_metrics.get('gpu_allocated_mb', 0):.2f} MB"
-    )
-
-    print(
-        f"GPU reserved        : "
-        f"{server_metrics.get('gpu_reserved_mb', 0):.2f} MB"
-    )
-
-    print(
         f"GPU peak            : "
         f"{server_metrics.get('gpu_peak_mb', 0):.2f} MB"
     )
@@ -879,18 +1060,159 @@ def main():
             f"{adjusted_path}"
         )
 
-    print(
-        f"Reference WAV       : "
-        f"{reference_audio_path}"
-    )
-
-    print(
-        f"Reference voices    : enabled"
-    )
-
     print("=" * 80)
 
 
-if __name__ == "__main__":
+# =============================================================================
+# MAIN
+# =============================================================================
 
+def main():
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Dia TTS client: "
+            "seed audition + "
+            "reference-conditioned long TTS"
+        )
+    )
+
+    parser.add_argument(
+        "--server",
+        default="http://localhost:8000",
+    )
+
+    parser.add_argument(
+        "--text",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--text-file",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+    )
+
+    parser.add_argument(
+        "--reference-audio",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--reference-text",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+    )
+
+    parser.add_argument(
+        "--output",
+        default="output.wav",
+    )
+
+    parser.add_argument(
+        "--play",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--speed",
+        type=float,
+        default=1.0,
+    )
+
+    parser.add_argument(
+        "--save-adjusted",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=1800.0,
+    )
+
+    args = parser.parse_args()
+
+    if args.speed <= 0:
+
+        print(
+            "--speed must be > 0"
+        )
+
+        sys.exit(1)
+
+    # =========================================================================
+    # REFERENCE MODE
+    # =========================================================================
+
+    if (
+        args.reference_audio is not None
+        or
+        args.reference_text is not None
+    ):
+
+        if args.max_new_tokens is None:
+            args.max_new_tokens = 4096
+
+        run_reference_mode(
+            args
+        )
+
+        return
+
+    # =========================================================================
+    # SEED MODE
+    # =========================================================================
+
+    if args.seed is not None:
+
+        if args.max_new_tokens is None:
+            args.max_new_tokens = 1024
+
+        run_seed_mode(
+            args
+        )
+
+        return
+
+    print("")
+    print(
+        "Choose one mode:"
+    )
+
+    print("")
+    print(
+        "Seed mode:"
+    )
+
+    print(
+        "  --seed <number> "
+        "--text \"[S1] ... [S2] ...\""
+    )
+
+    print("")
+    print(
+        "Reference mode:"
+    )
+
+    print(
+        "  --text-file full_call.txt "
+        "--reference-audio reference.wav "
+        "--reference-text reference.txt"
+    )
+
+    sys.exit(1)
+
+
+if __name__ == "__main__":
     main()
