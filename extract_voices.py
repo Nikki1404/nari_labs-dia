@@ -703,3 +703,6 @@ def main():
 if __name__ == "__main__":
 
     main()
+
+
+#python extract_voices.py --input-dir shortlisted\random_wavs --reference-text reference.txt --agent-file seed_3096.wav --output-dir extracted_voices
